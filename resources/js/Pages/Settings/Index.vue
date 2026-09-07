@@ -362,7 +362,7 @@ const onUpdateAccount = () => {
 
                                 <fieldset :disabled="!canEdit('workload')" class="grid grid-cols-1 sm:grid-cols-4 gap-5">
                                     <FloatLabel variant="on">
-                                        <InputNumber id="maxLoad" size="large" v-model="workloadForm.max_teaching_load" class="w-full" :min="1" :max="40" />
+                                        <InputNumber id="maxLoad" size="large" v-model="workloadForm.max_teaching_load" class="w-full" :min="1" :max="42" />
                                         <label for="maxLoad">Max Teaching Load (units/hrs)</label>
                                     </FloatLabel>
                                     <FloatLabel variant="on">

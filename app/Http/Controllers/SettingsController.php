@@ -148,7 +148,7 @@ class SettingsController extends Controller
         $this->authorizeGroup($request, 'workload');
 
         $data = $request->validate([
-            'max_teaching_load' => ['required', 'integer', 'min:1', 'max:40'],
+            'max_teaching_load' => ['required', 'integer', 'min:1', 'max:42'],
             'warning_threshold' => ['required', 'integer', 'min:0', 'max:100'],
             'overloaded_threshold' => ['required', 'integer', 'min:0', 'max:200'],
             'allow_admin_override' => ['required', 'boolean'],

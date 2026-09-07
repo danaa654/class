@@ -9,6 +9,7 @@ import Toolbar from 'primevue/toolbar';
 import InputText from 'primevue/inputtext';
 import Textarea from 'primevue/textarea';
 import Select from 'primevue/select';
+import MultiSelect from 'primevue/multiselect';
 import Button from 'primevue/button';
 import Tag from 'primevue/tag';
 import Dialog from 'primevue/dialog';
@@ -92,7 +93,19 @@ const groupedSections = computed(() => {
 const dialogVisible = ref(false);
 const editingItem = ref(null); // null => Add mode, otherwise the item being edited
 
-const form = useForm({
+// Add mode places one or more Subjects at once (checkbox multi-select),
+// sharing one Year Level / Semester / Remarks, via addForm. Edit mode
+// still targets a single CurriculumItem with its own Subject +
+// Prerequisite fields, via editForm. Two separate useForm instances keep
+// their field shapes (and Inertia's per-request transforms) independent.
+const addForm = useForm({
+    subject_ids: [],
+    year_level: null,
+    semester: null,
+    remarks: '',
+});
+
+const editForm = useForm({
     subject_id: null,
     year_level: null,
     semester: null,
@@ -100,9 +113,23 @@ const form = useForm({
     remarks: '',
 });
 
-// Subject dropdown: exclude subjects already placed in this curriculum,
-// but keep the item's own current subject available while editing it.
-const subjectOptions = computed(() => {
+// `form` is a read-only alias to whichever form is active, used by the
+// shared Year Level / Semester / Remarks fields and error messages in the
+// template so those markup blocks don't need to branch on mode.
+const form = computed(() => (editingItem.value ? editForm : addForm));
+
+// Subject options for Add mode (checkbox multi-select): every Subject not
+// yet placed in this curriculum.
+const subjectOptions = computed(() =>
+    props.availableSubjects.map((subject) => ({
+        label: `${subject.subject_code} — ${subject.subject_title}`,
+        value: subject.id,
+    })),
+);
+
+// Subject options for Edit mode: same list, but keep the item's own
+// current subject available since it's excluded from availableSubjects.
+const editSubjectOptions = computed(() => {
     const base = props.availableSubjects;
     const options = editingItem.value && editingItem.value.subject
         ? [editingItem.value.subject, ...base]
@@ -118,7 +145,7 @@ const subjectOptions = computed(() => {
 // selected as the Subject (a subject can't be its own prerequisite).
 const prerequisiteOptions = computed(() =>
     props.allSubjects
-        .filter((subject) => subject.id !== form.subject_id)
+        .filter((subject) => subject.id !== editForm.subject_id)
         .map((subject) => ({
             label: `${subject.subject_code} — ${subject.subject_title}`,
             value: subject.id,
@@ -127,37 +154,39 @@ const prerequisiteOptions = computed(() =>
 
 const openAdd = () => {
     editingItem.value = null;
-    form.clearErrors();
-    form.reset();
+    addForm.clearErrors();
+    addForm.reset();
     dialogVisible.value = true;
 };
 
 const openEdit = (item) => {
     editingItem.value = item;
-    form.clearErrors();
-    form.subject_id = item.subject_id;
-    form.year_level = item.year_level;
-    form.semester = item.semester;
-    form.prerequisite_subject_id = item.prerequisite_subject_id;
-    form.remarks = item.remarks ?? '';
+    editForm.clearErrors();
+    editForm.subject_id = item.subject_id;
+    editForm.year_level = item.year_level;
+    editForm.semester = item.semester;
+    editForm.prerequisite_subject_id = item.prerequisite_subject_id;
+    editForm.remarks = item.remarks ?? '';
     dialogVisible.value = true;
 };
 
 const closeDialog = () => {
     dialogVisible.value = false;
     editingItem.value = null;
-    form.clearErrors();
-    form.reset();
+    addForm.clearErrors();
+    addForm.reset();
+    editForm.clearErrors();
+    editForm.reset();
 };
 
 const onSave = () => {
     if (editingItem.value) {
-        form.put(route('curriculums.subjects.update', [props.curriculum.id, editingItem.value.id]), {
+        editForm.put(route('curriculums.subjects.update', [props.curriculum.id, editingItem.value.id]), {
             preserveScroll: true,
             onSuccess: () => closeDialog(),
         });
     } else {
-        form.post(route('curriculums.subjects.store', props.curriculum.id), {
+        addForm.post(route('curriculums.subjects.store', props.curriculum.id), {
             preserveScroll: true,
             onSuccess: () => closeDialog(),
         });
@@ -392,29 +421,59 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                     />
                 </div>
 
-                <!-- Subject -->
-                <div class="flex flex-col gap-1">
+                <!-- Subject: checkbox multi-select in Add mode, single select in Edit mode -->
+                <div v-if="!editingItem" class="flex flex-col gap-1">
+                    <label for="subject_ids" class="text-sm font-medium" :class="isDark ? 'text-slate-300' : 'text-slate-700'">
+                        Subjects <span class="text-red-500">*</span>
+                    </label>
+                    <MultiSelect
+                        id="subject_ids"
+                        v-model="addForm.subject_ids"
+                        :options="subjectOptions"
+                        optionLabel="label"
+                        optionValue="value"
+                        display="chip"
+                        filter
+                        appendTo="self"
+                        filterPlaceholder="Search subject code or title"
+                        placeholder="Select one or more subjects"
+                        :showToggleAll="true"
+                        :invalid="!!addForm.errors.subject_ids"
+                        class="w-full"
+                        :pt="{
+                            overlay: { class: isDark ? 'dark-scope' : '', style: { width: '100%', maxWidth: '100%' } },
+                        }"
+                    />
+                    <small v-if="addForm.errors.subject_ids" class="text-red-500">
+                        {{ addForm.errors.subject_ids }}
+                    </small>
+                    <small :class="isDark ? 'text-slate-500' : 'text-slate-400'">
+                        Check every subject that belongs to this Year Level and Semester — they'll all be added at once. Set a prerequisite for a subject afterward using Edit.
+                    </small>
+                </div>
+
+                <div v-else class="flex flex-col gap-1">
                     <label for="subject_id" class="text-sm font-medium" :class="isDark ? 'text-slate-300' : 'text-slate-700'">
                         Subject <span class="text-red-500">*</span>
                     </label>
                     <Select
                         id="subject_id"
-                        v-model="form.subject_id"
-                        :options="subjectOptions"
+                        v-model="editForm.subject_id"
+                        :options="editSubjectOptions"
                         optionLabel="label"
                         optionValue="value"
                         filter
                         appendTo="self"
                         filterPlaceholder="Search subject code or title"
                         placeholder="Select a subject"
-                        :invalid="!!form.errors.subject_id"
+                        :invalid="!!editForm.errors.subject_id"
                         class="w-full"
                         :pt="{
                             overlay: { class: isDark ? 'dark-scope' : '', style: { width: '100%', maxWidth: '100%' } },
                         }"
                     />
-                    <small v-if="form.errors.subject_id" class="text-red-500">
-                        {{ form.errors.subject_id }}
+                    <small v-if="editForm.errors.subject_id" class="text-red-500">
+                        {{ editForm.errors.subject_id }}
                     </small>
                 </div>
 
@@ -461,14 +520,14 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                     </div>
                 </div>
 
-                <!-- Prerequisite -->
-                <div class="flex flex-col gap-1">
+                <!-- Prerequisite (Edit mode only — a bulk Add covers several Subjects) -->
+                <div v-if="editingItem" class="flex flex-col gap-1">
                     <label for="prerequisite_subject_id" class="text-sm font-medium" :class="isDark ? 'text-slate-300' : 'text-slate-700'">
                         Prerequisite
                     </label>
                     <Select
                         id="prerequisite_subject_id"
-                        v-model="form.prerequisite_subject_id"
+                        v-model="editForm.prerequisite_subject_id"
                         :options="prerequisiteOptions"
                         optionLabel="label"
                         optionValue="value"
@@ -476,12 +535,12 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                         filterPlaceholder="Search subject code or title"
                         placeholder="None"
                         showClear
-                        :invalid="!!form.errors.prerequisite_subject_id"
+                        :invalid="!!editForm.errors.prerequisite_subject_id"
                         class="w-full"
                         :pt="{ overlay: { class: isDark ? 'dark-scope' : '' } }"
                     />
-                    <small v-if="form.errors.prerequisite_subject_id" class="text-red-500">
-                        {{ form.errors.prerequisite_subject_id }}
+                    <small v-if="editForm.errors.prerequisite_subject_id" class="text-red-500">
+                        {{ editForm.errors.prerequisite_subject_id }}
                     </small>
                 </div>
 

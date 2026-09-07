@@ -56,15 +56,38 @@ class CurriculumSubjectController extends Controller
     }
 
     /**
-     * Place a master Subject into the Curriculum.
+     * Place one or more master Subjects into the Curriculum at once.
+     *
+     * The Add Subject dialog now uses a checkbox multi-select, so a single
+     * submit can create several CurriculumItem rows sharing the same Year
+     * Level / Semester / Remarks. Prerequisite is not set here — it's
+     * per-Subject and can be added afterward via Edit.
      */
     public function store(StoreCurriculumItemRequest $request, Curriculum $curriculum): RedirectResponse
     {
-        $curriculum->items()->create($request->validated());
+        $validated = $request->validated();
+
+        $rows = collect($validated['subject_ids'])->map(fn ($subjectId) => [
+            'curriculum_id' => $curriculum->id,
+            'subject_id' => $subjectId,
+            'year_level' => $validated['year_level'],
+            'semester' => $validated['semester'],
+            'prerequisite_subject_id' => null,
+            'remarks' => $validated['remarks'] ?? null,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Plain insert() bypasses the items() relation's automatic
+        // curriculum_id assignment (that only happens via create()/save()),
+        // so it's set explicitly on every row above.
+        CurriculumItem::insert($rows->all());
+
+        $count = $rows->count();
 
         return redirect()
             ->route('curriculums.subjects', $curriculum)
-            ->with('success', 'Subject added to the curriculum.');
+            ->with('success', $count === 1 ? 'Subject added to the curriculum.' : "{$count} subjects added to the curriculum.");
     }
 
     /**
