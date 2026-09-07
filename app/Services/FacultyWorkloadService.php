@@ -152,6 +152,75 @@ class FacultyWorkloadService
     }
 
     /**
+     * BATCHED FULL EVALUATION — same output shape as evaluate() (with
+     * no additional-subject/excluding-id arguments), for an entire
+     * roster of Faculty in one pass instead of one call per row.
+     *
+     * FacultyController::index() was calling evaluate() once per
+     * Faculty row on the page — and evaluate() itself calls
+     * currentLoad() AND assignedSubjectsCount(), each of which queries
+     * activePlacements() independently — so a page of 10 Faculty ran
+     * 20 fresh SectionSubject queries on every single visit. That was
+     * the actual source of the Faculty page's sidebar-click lag, the
+     * same pattern currentLoadsFor() already fixed for
+     * SectionSubjectController::show(). This loads every relevant
+     * placement once, groups it in memory, then reuses evaluate()'s
+     * exact math with zero extra queries per Faculty member.
+     *
+     * Only covers the "no candidate additional Subject" case (the one
+     * FacultyController::index() actually needs) and never attaches
+     * the placement list ($includePlacements) — the "would adding one
+     * more Subject exceed the cap" check and the Faculty Details
+     * Workload tab's placement list stay on evaluate() itself,
+     * unchanged, exactly as before.
+     *
+     * @param  \Illuminate\Support\Collection<int, Faculty>  $faculty
+     * @return array<int, array> Faculty id => same shape as evaluate()
+     */
+    public function evaluateMany($faculty): array
+    {
+        $facultyIds = $faculty->pluck('id')->all();
+
+        if (empty($facultyIds)) {
+            return [];
+        }
+
+        $placementsByFaculty = SectionSubject::query()
+            ->whereIn('faculty_id', $facultyIds)
+            ->whereIn('status', ['Scheduled', 'Draft'])
+            ->whereIn('section_id', $this->conflictService->activeSemesterSectionIds())
+            ->whereNull('merged_into_section_subject_id')
+            ->with('subject:id,units,lecture_hours,laboratory_hours')
+            ->get()
+            ->filter(fn (SectionSubject $ss) => $ss->subject !== null)
+            ->groupBy('faculty_id');
+
+        return $faculty->mapWithKeys(function (Faculty $facultyMember) use ($placementsByFaculty) {
+            $placements = $placementsByFaculty->get($facultyMember->id, collect());
+
+            $max = $this->maxLoad($facultyMember);
+            $current = $this->sumLoad($facultyMember, $placements);
+            $percent = $max > 0 ? (int) round(($current / $max) * 100) : 0;
+            $status = $this->statusFor($percent);
+
+            return [$facultyMember->id => [
+                'current' => $current,
+                'max' => $max,
+                'remaining' => $max - $current,
+                'projected' => $current,
+                'additional' => 0,
+                'percent' => $percent,
+                'projected_percent' => $percent,
+                'exceeds' => false,
+                'status' => $status,
+                'status_color' => $this->statusColor($status),
+                'unit_label' => $this->unitLabel($facultyMember),
+                'assigned_subjects' => $placements->count(),
+            ]];
+        })->all();
+    }
+
+    /**
      * How many Subjects (placements) this Faculty member is currently
      * carrying in the active semester — the "Number of Assigned
      * Subjects" field the Faculty profile exposes.

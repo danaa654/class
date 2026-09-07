@@ -75,9 +75,16 @@ class FacultyController extends Controller
         // report, computed via FacultyWorkloadService — the same
         // engine Auto Generate/Recommend/Manual Assignment/Save
         // Schedule use — so this can never disagree with those.
-        $faculties->getCollection()->transform(function (Faculty $faculty) {
-            $evaluation = $this->workloadService->evaluate($faculty);
-            $faculty->setAttribute('workload', $evaluation);
+        //
+        // PERFORMANCE: evaluateMany() computes this for every row on
+        // the page in one batched query, instead of the old
+        // per-row transform() calling evaluate() once per Faculty
+        // (which itself ran 2 fresh queries per row) — see
+        // evaluateMany()'s doc comment on FacultyWorkloadService.
+        $workloads = $this->workloadService->evaluateMany($faculties->getCollection());
+
+        $faculties->getCollection()->transform(function (Faculty $faculty) use ($workloads) {
+            $faculty->setAttribute('workload', $workloads[$faculty->id] ?? $this->workloadService->evaluate($faculty));
 
             return $faculty;
         });

@@ -14,6 +14,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -69,8 +70,28 @@ class RoomController extends Controller
         // schedules, so they can't be filtered in SQL — pull the
         // (already-filtered-by-search/building/etc) set, summarize it
         // in one batch, then filter/paginate in memory.
-        $allRooms = $roomsQuery->orderBy('room_code')->get();
-        $summaries = $this->utilization->summarizeRooms($allRooms);
+        //
+        // PERFORMANCE: this full fetch + summarize runs on every visit
+        // to this page (i.e. every sidebar click into Rooms), even
+        // though the underlying schedule data rarely changes between
+        // two clicks a few seconds apart. Cache the (rooms, summaries)
+        // pair for a short window, keyed by the exact filter query and
+        // the user's Viewing Term, so repeat/rapid navigation into this
+        // page is instant instead of re-querying + re-computing every
+        // time. Short TTL (15s) keeps staleness negligible for an
+        // admin tool while still absorbing the common "click away and
+        // click back" / pagination-click pattern that was the main
+        // source of the lag.
+        $cacheKey = 'rooms.index.'.md5(serialize([
+            \App\Support\ViewingTerm::resolve($request)?->id,
+            $request->query(),
+        ]));
+
+        [$allRooms, $summaries] = Cache::remember($cacheKey, now()->addSeconds(15), function () use ($roomsQuery) {
+            $rooms = $roomsQuery->orderBy('room_code')->get();
+
+            return [$rooms, $this->utilization->summarizeRooms($rooms)];
+        });
 
         $filtered = $allRooms->filter(function (Room $room) use ($summaries, $quickFilter, $utilizationMin, $utilizationMax, $availabilityFilter) {
             $summary = $summaries[$room->id];
