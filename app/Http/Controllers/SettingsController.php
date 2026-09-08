@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\FacultyLoadRequest;
 use App\Models\SchoolYear;
 use App\Services\PasswordPolicyService;
 use App\Services\SettingsService;
@@ -148,7 +149,13 @@ class SettingsController extends Controller
         $this->authorizeGroup($request, 'workload');
 
         $data = $request->validate([
-            'max_teaching_load' => ['required', 'integer', 'min:1', 'max:42'],
+            // Capped at HARD_CAP_UNITS, not a separate magic number —
+            // the configured default can never legally exceed the
+            // institution-wide hard ceiling that FacultyLoadRequest::
+            // effectiveCapFor() enforces on every overload request, so
+            // Settings must not accept a value that ceiling will just
+            // silently clamp back down anyway.
+            'max_teaching_load' => ['required', 'integer', 'min:1', 'max:'.FacultyLoadRequest::HARD_CAP_UNITS],
             'warning_threshold' => ['required', 'integer', 'min:0', 'max:100'],
             'overloaded_threshold' => ['required', 'integer', 'min:0', 'max:200'],
             'allow_admin_override' => ['required', 'boolean'],

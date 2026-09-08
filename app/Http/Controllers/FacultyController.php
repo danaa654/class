@@ -7,8 +7,8 @@ use App\Http\Requests\UpdateFacultyRequest;
 use App\Models\College;
 use App\Models\Faculty;
 use App\Models\FacultyLoadRequest;
-use App\Models\FacultyRequest;
 use App\Models\Subject;
+use App\Models\User;
 use App\Services\ActivityLogService;
 use App\Services\FacultyScheduleEmailService;
 use App\Services\FacultyWorkloadService;
@@ -29,6 +29,28 @@ class FacultyController extends Controller
         private readonly ActivityLogService $activityLog,
         private readonly FacultyScheduleEmailService $facultyScheduleEmail,
     ) {
+    }
+
+    /**
+     * The Colleges selectable in the Add/Edit Faculty "College" dropdown.
+     *
+     * A College-scoped Dean/OIC may only ever place a Faculty member in
+     * their own College (see FacultyPolicy::createForCollege() /
+     * reassignCollege()), so their dropdown is narrowed to just that
+     * one College — there's no point showing (or letting them pick)
+     * options the backend would reject anyway. Admin/Registrar/
+     * Assistant Dean still see the full active list.
+     */
+    private function selectableColleges(?User $user)
+    {
+        return College::query()
+            ->where('status', 'Active')
+            ->when(
+                AccessScope::isCollegeScoped($user),
+                fn ($query) => $query->where('id', $user->college_id),
+            )
+            ->orderBy('name')
+            ->get(['id', 'name']);
     }
 
     /**
@@ -92,100 +114,17 @@ class FacultyController extends Controller
         return Inertia::render('Scheduling/Faculty/Index', [
             'faculties' => $faculties,
             'filters' => ['faculty_search' => $search, 'faculty_category' => $category],
-            'colleges' => College::query()
-                ->where('status', 'Active')
-                ->orderBy('name')
-                ->get(['id', 'name']),
+            'colleges' => $this->selectableColleges($request->user()),
             'nextFacultyId' => $this->nextFacultyId(),
 
-            // Faculty Load Requests — moved here from its own page
-            // (formerly FacultyLoadRequestController@index) so it
-            // renders as a section on the Faculty page itself.
-            ...$this->loadRequestsProps($request),
-
-            // Faculty Management requests (Creation/Deactivation) —
-            // see FacultyRequestController.
-            ...$this->facultyRequestsProps($request),
+            // Faculty creation/load-edit are now direct actions for
+            // every Scheduling-side role (Admin, Registrar, Dean/OIC,
+            // Assistant Dean) — see FacultyPolicy::create()/
+            // changeMaxLoad(). There is no longer a Faculty Load
+            // Request or Faculty (Creation/Deletion) Request queue.
+            'canCreateFacultyDirectly' => $request->user()->can('create', Faculty::class),
+            'hardCapUnits' => FacultyLoadRequest::effectiveCapFor($request->user()),
         ]);
-    }
-
-    /**
-     * Props for the "Faculty Requests" section of the Faculty page.
-     * Admin/Registrar see the full review queue; Dean/OIC/Assistant
-     * Dean see only requests within their own scope (their own
-     * submissions), so they can track status.
-     */
-    private function facultyRequestsProps(Request $request): array
-    {
-        $user = $request->user();
-
-        $facultyRequests = FacultyRequest::query()
-            ->with(['faculty:id,faculty_id,first_name,last_name,college_id,status', 'college:id,name', 'requestedBy:id,name', 'reviewedBy:id,name'])
-            ->visibleTo($user)
-            ->latest()
-            ->paginate(10, ['*'], 'faculty_requests_page')
-            ->withQueryString();
-
-        $pendingFacultyRequestsCount = FacultyRequest::query()->visibleTo($user)->where('status', 'Pending')->count();
-
-        return [
-            'facultyRequests' => $facultyRequests,
-            'pendingFacultyRequestsCount' => $pendingFacultyRequestsCount,
-            'canReviewFacultyRequests' => $user->can('review', FacultyRequest::class),
-            'canCreateFacultyDirectly' => $user->can('create', Faculty::class),
-            'canRequestFacultyCreation' => $user->can('requestCreate', [Faculty::class, AccessScope::isAssistantDean($user) ? null : $user->college_id]),
-        ];
-    }
-
-    /**
-     * Props for the "Faculty Load Requests" section of the Faculty
-     * page. Admin/Registrar see the full queue (for review); Dean/OIC/
-     * Assistant Dean see only requests touching faculty in their own
-     * scope, so they can track status of what they've submitted.
-     */
-    private function loadRequestsProps(Request $request): array
-    {
-        $user = $request->user();
-
-        $loadRequests = FacultyLoadRequest::query()
-            ->with(['faculty:id,faculty_id,first_name,last_name,college_id,max_teaching_units,max_weekly_hours', 'requestedBy:id,name', 'reviewedBy:id,name'])
-            ->when(! AccessScope::isUnrestricted($user), function ($query) use ($user) {
-                $query->whereHas('faculty', function ($facultyQuery) use ($user) {
-                    if (AccessScope::isAssistantDean($user)) {
-                        $facultyQuery->whereNull('college_id');
-
-                        return;
-                    }
-
-                    $facultyQuery->where('college_id', $user->college_id);
-                });
-            });
-
-        // Count BEFORE pagination — used for the reminder banner so it
-        // reflects the whole scoped queue, not just whatever page of
-        // the table happens to be loaded.
-        $pendingCount = (clone $loadRequests)->where('status', 'Pending')->count();
-
-        $loadRequests = $loadRequests
-            ->latest()
-            ->paginate(10, ['*'], 'load_requests_page')
-            ->withQueryString();
-
-        return [
-            'loadRequests' => $loadRequests,
-            'pendingLoadRequestsCount' => $pendingCount,
-            'hardCapUnits' => FacultyLoadRequest::effectiveCapFor($user),
-            // Faculty roster for the "New Request" dropdown, scoped the
-            // same way the Faculty Master roster itself is — a Dean
-            // can only request an increase for faculty they can
-            // already see/manage.
-            'loadRequestFaculties' => Faculty::query()
-                ->visibleTo($user)
-                ->where('status', 'Active')
-                ->orderBy('last_name')
-                ->get(['id', 'faculty_id', 'first_name', 'last_name', 'max_teaching_units', 'max_weekly_hours', 'workload_type']),
-            'canReviewLoadRequests' => $user->can('review', FacultyLoadRequest::class),
-        ];
     }
 
     /**
@@ -219,10 +158,7 @@ class FacultyController extends Controller
             'deactivationImpact' => $this->workloadService->deactivationImpact($faculty),
             'canDeactivateDirectly' => $user->can('delete', $faculty),
             'canRequestDeactivation' => $user->can('requestDeactivate', $faculty),
-            'colleges' => College::query()
-                ->where('status', 'Active')
-                ->orderBy('name')
-                ->get(['id', 'name']),
+            'colleges' => $this->selectableColleges($user),
             'subjects' => Subject::query()
                 ->where('is_active', true)
                 ->orderBy('subject_code')
@@ -263,11 +199,13 @@ class FacultyController extends Controller
         // but the policy check here is the authoritative gate.
         $this->authorize('createForCollege', [Faculty::class, $data['college_id'] ?? null]);
 
-        // Same rule as update(): only Admin/Registrar may set a load
-        // ceiling above the system default when creating a new Faculty
-        // record. Dean/OIC/Assistant Dean get the default regardless
-        // of what they typed — they can submit a FacultyLoadRequest
-        // afterward if this new hire genuinely needs a higher ceiling.
+        // Same rule as update(): anyone with changeMaxLoad access
+        // (Admin, Registrar, Dean, OIC, Assistant Dean) may set a load
+        // ceiling above the system default when creating a new
+        // Faculty record — see FacultyPolicy::changeMaxLoad(). Anyone
+        // else gets the default regardless of what they typed, and
+        // has no direct write path to raise it afterward except
+        // through FacultyLoadRequestController's request/review queue.
         if (! $request->user()->can('changeMaxLoad', Faculty::class)) {
             $data['max_teaching_units'] = 24;
             $data['max_weekly_hours'] = null;
@@ -284,6 +222,12 @@ class FacultyController extends Controller
             $faculty,
             $request->user(),
         );
+
+        // Notify Administrator, Registrar, and Assistant Dean so the
+        // institution-wide/GenEd side sees a new hire land on the
+        // roster even when a College-scoped Dean/OIC added it
+        // directly. See NotificationService::facultyCreatedDirectly().
+        $this->notifications->facultyCreatedDirectly($faculty, $request->user());
 
         return redirect()->route('scheduling.faculty')->with('success', 'Faculty member added successfully.');
     }
@@ -305,13 +249,13 @@ class FacultyController extends Controller
             $this->authorize('reassignCollege', Faculty::class);
         }
 
-        // Per the new Faculty Load Request workflow: Dean/OIC/
-        // Assistant Dean have no direct write path to a faculty
-        // member's load ceiling — only Admin/Registrar do (see
-        // FacultyPolicy::changeMaxLoad()). Anyone else submitting this
-        // form has those fields silently pinned back to their current
-        // value, same pattern as college_id above. They must go
-        // through FacultyLoadRequestController instead.
+        // Anyone with changeMaxLoad access (Admin, Registrar, Dean,
+        // OIC, Assistant Dean — see FacultyPolicy::changeMaxLoad())
+        // has a direct write path to a faculty member's load ceiling
+        // right here. Anyone else submitting this form has those
+        // fields silently pinned back to their current value, same
+        // pattern as college_id above — they must go through
+        // FacultyLoadRequestController's request/review queue instead.
         if (! $request->user()->can('changeMaxLoad', Faculty::class)) {
             $data['max_teaching_units'] = $faculty->max_teaching_units;
             $data['max_weekly_hours'] = $faculty->max_weekly_hours;
@@ -324,7 +268,35 @@ class FacultyController extends Controller
         // "load updated" notification).
         $oldMaxTeachingUnits = $faculty->max_teaching_units;
 
-        $faculty->update($data);
+        // Fill (don't save yet) so getDirty() tells us exactly which
+        // columns actually changed value, not just which keys were
+        // present in the form payload — e.g. re-submitting the same
+        // status shouldn't count as a change. The load-ceiling fields
+        // are excluded here: they already get their own, more
+        // specific notification (facultyMaxLoadEditedDirectly() to
+        // the College side) just below, so folding them into the
+        // general "Faculty Information Updated" notification too
+        // would double-notify for the same edit. Per spec Section 7
+        // ("do not generate unnecessary notifications for
+        // insignificant UI changes"), cosmetic fields (middle name,
+        // suffix, remarks, contact info) are excluded too — a
+        // notification-worthy edit is one that changes who/where the
+        // faculty member is (name, College, status, employment type,
+        // Faculty ID) or is caught by its own dedicated notification
+        // (qualifications via TeachingQualificationController, load
+        // via facultyMaxLoadEditedDirectly() below).
+        $faculty->fill($data);
+        $changedFields = array_intersect(
+            array_keys($faculty->getDirty()),
+            ['faculty_id', 'first_name', 'last_name', 'employment_type', 'college_id', 'status'],
+        );
+        $changes = array_map(fn (string $field) => [
+            'field' => $field,
+            'old' => $faculty->getOriginal($field),
+            'new' => $faculty->{$field},
+        ], $changedFields);
+
+        $faculty->save();
 
         if (array_key_exists('max_teaching_units', $data) && $data['max_teaching_units'] !== $oldMaxTeachingUnits) {
             $this->notifications->facultyMaxLoadEditedDirectly(
@@ -332,7 +304,18 @@ class FacultyController extends Controller
                 $request->user(),
                 $oldMaxTeachingUnits,
                 $data['max_teaching_units'],
+                $this->workloadService,
             );
+        }
+
+        // Any other significant field a Dean/OIC/Assistant Dean/
+        // Admin/Registrar just changed directly (name, employment
+        // type, College, status, Faculty ID) — notify Admin/
+        // Registrar/the Faculty's own College Dean/OIC/Assistant Dean
+        // so it doesn't go unnoticed. See
+        // NotificationService::facultyUpdatedDirectly().
+        if (! empty($changes)) {
+            $this->notifications->facultyUpdatedDirectly($faculty, $request->user(), $changes);
         }
 
         $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));

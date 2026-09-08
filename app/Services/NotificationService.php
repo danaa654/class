@@ -12,6 +12,7 @@ use App\Models\FacultyLoadRequest;
 use App\Models\User;
 use App\Support\AccessScope;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
 
 /**
  * SCHEDULING NOTIFICATION SYSTEM — central service.
@@ -83,9 +84,21 @@ class NotificationService
 
     public const TYPE_FACULTY_ASSIGNMENTS_NEED_ATTENTION = 'FACULTY_ASSIGNMENTS_NEED_ATTENTION';
 
+    public const TYPE_FACULTY_CREATED_DIRECTLY = 'FACULTY_CREATED_DIRECTLY';
+
+    public const TYPE_FACULTY_UPDATED_DIRECTLY = 'FACULTY_UPDATED_DIRECTLY';
+
     public const TYPE_FACULTY_DEACTIVATED_DIRECTLY = 'FACULTY_DEACTIVATED_DIRECTLY';
 
     public const TYPE_FACULTY_DELETED_DIRECTLY = 'FACULTY_DELETED_DIRECTLY';
+
+    public const TYPE_FACULTY_WORKLOAD_UPDATED = 'FACULTY_WORKLOAD_UPDATED';
+
+    public const TYPE_FACULTY_WORKLOAD_OVERRIDDEN = 'FACULTY_WORKLOAD_OVERRIDDEN';
+
+    public const TYPE_FACULTY_OVERLOAD = 'FACULTY_OVERLOAD';
+
+    public const TYPE_FACULTY_QUALIFICATIONS_UPDATED = 'FACULTY_QUALIFICATIONS_UPDATED';
 
     // An Administrator flipped "Require password change on next
     // login" for a user in User Management — see
@@ -444,30 +457,122 @@ class NotificationService
      * Units straight from the Edit Faculty form (FacultyController::
      * update()) — a plain roster edit, not the Faculty Load Request
      * workflow, so there's no FacultyLoadRequest row to attach this
-     * to. Still notifies the Dean/OIC of the Faculty's College (or
-     * Assistant Dean for General Education/no-College faculty) so
-     * they're not blindsided by their faculty member's ceiling
-     * changing with no request/approval trail at all. Only call this
-     * when the value actually changed — see FacultyController::
-     * update().
+     * to. Notifies the full facultyRecipients() set (Admin/Registrar +
+     * the Faculty's own College Dean/OIC + Assistant Dean, actor
+     * excluded) per spec Section 4 ("Registrar adds workload to CTE
+     * faculty → notify Admin + CTE Dean/OIC/Assistant Dean, not
+     * Registrar"). Only call this when the value actually changed —
+     * see FacultyController::update().
+     *
+     * If the new ceiling leaves the Faculty member's actual assigned
+     * load ($workloadService->evaluate()'s 'current') ABOVE it, this
+     * also fires a separate, higher-priority overload() notification
+     * (spec Section 5) — pass $workloadService so this method can
+     * check without every caller having to remember to.
      */
-    public function facultyMaxLoadEditedDirectly(Faculty $faculty, User $actor, int $oldUnits, int $newUnits): void
+    public function facultyMaxLoadEditedDirectly(Faculty $faculty, User $actor, int $oldUnits, int $newUnits, ?\App\Services\FacultyWorkloadService $workloadService = null): void
     {
         $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
 
-        foreach ($this->collegeRecipientsForFaculty($faculty, $actor) as $recipient) {
+        foreach ($this->facultyRecipients($faculty, $actor) as $recipient) {
             $this->writeNotification(
                 recipient: $recipient,
                 actor: $actor,
-                type: self::TYPE_FACULTY_LOAD_REQUEST_REVIEWED,
+                type: self::TYPE_FACULTY_WORKLOAD_UPDATED,
                 priority: self::PRIORITY_IMPORTANT,
-                title: 'Faculty Load Updated',
-                message: "{$actor->full_name} updated {$facultyName}'s teaching load ceiling ({$oldUnits} → {$newUnits} units) from the Faculty Master.",
+                title: 'Faculty Workload Updated',
+                message: "{$facultyName}'s teaching workload has been updated by {$actor->full_name}.",
                 data: [
                     'faculty_id' => $faculty->id,
                     'faculty_name' => $facultyName,
-                    'current_max_teaching_units' => $oldUnits,
-                    'requested_max_teaching_units' => $newUnits,
+                    'college_id' => $faculty->college_id,
+                    'previous_max_teaching_units' => $oldUnits,
+                    'new_max_teaching_units' => $newUnits,
+                    'added_units' => $newUnits - $oldUnits,
+                ],
+            );
+        }
+
+        if ($workloadService) {
+            $evaluation = $workloadService->evaluate($faculty);
+
+            if ($evaluation['max'] > 0 && $evaluation['current'] > $evaluation['max']) {
+                $this->facultyOverload($faculty, $actor, $evaluation, $oldUnits, $newUnits);
+            }
+        }
+    }
+
+    /**
+     * A Faculty member's actual assigned teaching load now exceeds
+     * their (possibly just-lowered) ceiling — spec Section 5. Higher
+     * priority than the plain workload-updated notice above, and
+     * fired IN ADDITION to it, not instead of it, so recipients see
+     * both "what changed" and "why it now needs attention". Same
+     * facultyRecipients() audience.
+     *
+     * @param  array<string, mixed>  $evaluation  FacultyWorkloadService::evaluate() output.
+     */
+    private function facultyOverload(Faculty $faculty, User $actor, array $evaluation, int $previousMax, int $newMax): void
+    {
+        $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
+
+        foreach ($this->facultyRecipients($faculty, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_FACULTY_OVERLOAD,
+                priority: self::PRIORITY_WARNING,
+                title: 'Faculty Workload Requires Attention',
+                message: "{$facultyName} has been assigned additional workload and is now above the standard teaching load.",
+                data: [
+                    'faculty_id' => $faculty->id,
+                    'faculty_name' => $facultyName,
+                    'college_id' => $faculty->college_id,
+                    'previous_max_teaching_units' => $previousMax,
+                    'new_max_teaching_units' => $newMax,
+                    'current_assigned_units' => $evaluation['current'],
+                    'assigned_by' => $actor->full_name,
+                ],
+            );
+        }
+    }
+
+    /**
+     * Someone with changeMaxLoad access (Admin, Registrar, Dean, OIC,
+     * or Assistant Dean) confirmed past the "exceeds allowable
+     * workload" warning in SectionSubjectController@update to schedule
+     * a Faculty member anyway. Fired on every override, independent of
+     * whether the AUTO-RAISE CEILING block in that same method also
+     * happened to move max_teaching_units — the override itself is the
+     * event worth surfacing, not just its side effect on the ceiling.
+     * Same facultyRecipients() audience as the rest of this section:
+     * Admin/Registrar + the Faculty's own College Dean/OIC + Assistant
+     * Dean, actor excluded.
+     *
+     * @param  array<string, mixed>  $workloadWarning  FacultyWorkloadService's warning payload — carries faculty_id/subject_code/projected.
+     */
+    public function facultyWorkloadOverridden(Faculty $faculty, SectionSubject $sectionSubject, User $actor, array $workloadWarning): void
+    {
+        $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
+        $sectionSubject->loadMissing('section', 'subject');
+
+        foreach ($this->facultyRecipients($faculty, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_FACULTY_WORKLOAD_OVERRIDDEN,
+                priority: self::PRIORITY_WARNING,
+                title: 'Teaching Load Limit Overridden',
+                message: "{$actor->full_name} overrode the teaching load limit warning to schedule {$facultyName} for {$sectionSubject->subject?->subject_code}".
+                    ($sectionSubject->section?->section_code ? " ({$sectionSubject->section->section_code})" : '').'.',
+                data: [
+                    'faculty_id' => $faculty->id,
+                    'faculty_name' => $facultyName,
+                    'college_id' => $faculty->college_id,
+                    'section_subject_id' => $sectionSubject->id,
+                    'section_id' => $sectionSubject->section_id,
+                    'subject_code' => $workloadWarning['subject_code'] ?? $sectionSubject->subject?->subject_code,
+                    'projected_units' => $workloadWarning['projected'] ?? null,
                 ],
             );
         }
@@ -604,11 +709,17 @@ class NotificationService
 
     /**
      * A Faculty member with active assignments was just deactivated
-     * (via an approved request OR a direct Admin/Registrar action)
-     * and those assignments now need manual attention — no automatic
-     * reassignment happens (spec Section 11). Notifies the Dean/OIC/
-     * Assistant Dean of the Faculty's College so the vacancy doesn't
+     * or deleted (via an approved request OR a direct Admin/Registrar
+     * action) and those assignments now need manual attention — no
+     * automatic reassignment happens (spec Section 11). Notifies the
+     * full facultyRecipients() set (Admin/Registrar + Dean/OIC/
+     * Assistant Dean of the Faculty's College) so the vacancy doesn't
      * go unnoticed until the next schedule run.
+     *
+     * Priority is CRITICAL for a deletion (spec Section 6: existing
+     * schedules may be affected and there's no going back), WARNING
+     * for a deactivation (still reversible by re-activating the
+     * Faculty record).
      *
      * @param  array<string, mixed>  $impact  FacultyWorkloadService::deactivationImpact() output.
      * @param  string  $action  Past-tense verb describing what just happened to the faculty ('deactivated' or 'deleted').
@@ -616,19 +727,174 @@ class NotificationService
     public function facultyAssignmentsNeedAttention(Faculty $faculty, array $impact, User $actor, string $action = 'deactivated'): void
     {
         $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
+        $priority = $action === 'deleted' ? self::PRIORITY_CRITICAL : self::PRIORITY_WARNING;
+        $title = $action === 'deleted' ? 'Faculty Deletion Requires Attention' : 'Faculty Assignment Requires Attention';
+        $message = $action === 'deleted'
+            ? "{$facultyName} is scheduled to teach existing subjects. Faculty deletion requires review because existing schedules may be affected ({$impact['subject_count']} subject(s) across {$impact['section_count']} section(s))."
+            : "{$facultyName} was {$action} with {$impact['subject_count']} active subject(s) across {$impact['section_count']} section(s) — these are now vacant and need reassignment.";
 
-        foreach ($this->collegeRecipientsForFaculty($faculty, $actor) as $recipient) {
+        foreach ($this->facultyRecipients($faculty, $actor) as $recipient) {
             $this->writeNotification(
                 recipient: $recipient,
                 actor: $actor,
                 type: self::TYPE_FACULTY_ASSIGNMENTS_NEED_ATTENTION,
-                priority: self::PRIORITY_WARNING,
-                title: 'Faculty Assignment Requires Attention',
-                message: "{$facultyName} was {$action} with {$impact['subject_count']} active subject(s) across {$impact['section_count']} section(s) — these are now vacant and need reassignment.",
+                priority: $priority,
+                title: $title,
+                message: $message,
                 data: [
+                    'faculty_id' => $faculty->id,
                     'faculty_name' => $facultyName,
+                    'college_id' => $faculty->college_id,
                     'subject_codes' => $impact['subject_codes'],
                     'section_codes' => $impact['section_codes'],
+                ],
+            );
+        }
+    }
+
+    /**
+     * A Dean/OIC/Assistant Dean/Admin/Registrar added a new Faculty
+     * member directly (FacultyController::store() — Faculty creation
+     * is now a direct action for every Scheduling-side role, see that
+     * controller's docblock). Notifies Administrator, Registrar, and
+     * Assistant Dean so the institution-wide/GenEd side isn't
+     * blindsided by a new hire landing on the roster with no
+     * request/approval trail — the creation-side counterpart to the
+     * courtesy facultyDeactivatedDirectly()/facultyDeletedDirectly()
+     * already give the College side for the opposite action.
+     *
+     * Recipients are Admin+Registrar+Assistant Dean (always) PLUS the
+     * Dean/OIC of the Faculty's own College when it has one — so
+     * whichever of these roles actually performed the action, every
+     * *other* stakeholder still hears about it: an Admin adding
+     * someone straight into CTE still reaches CTE's own Dean/OIC, not
+     * just the institution-wide side. Deduped and with the actor
+     * excluded, so nobody notifies themselves of their own action.
+     */
+    public function facultyCreatedDirectly(Faculty $faculty, User $actor): void
+    {
+        $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
+        $collegeName = $faculty->college_id ? $faculty->loadMissing('college')->college?->name : null;
+        $location = $collegeName ? " to {$collegeName}" : '';
+
+        foreach ($this->facultyRecipients($faculty, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_FACULTY_CREATED_DIRECTLY,
+                priority: self::PRIORITY_IMPORTANT,
+                title: 'New Faculty Added',
+                message: "New faculty member {$facultyName} has been added{$location} by {$actor->full_name}.",
+                data: [
+                    'faculty_id' => $faculty->id,
+                    'faculty_name' => $facultyName,
+                    'college_id' => $faculty->college_id,
+                    'college_name' => $collegeName,
+                    'added_by' => $actor->full_name,
+                ],
+            );
+        }
+    }
+
+    /**
+     * A Dean/OIC/Assistant Dean/Admin/Registrar edited a Faculty
+     * member's details directly (FacultyController::update()) — any
+     * SIGNIFICANT field except the teaching-load ceiling (max_
+     * teaching_units/max_weekly_hours/workload_type, which has its
+     * own targeted facultyMaxLoadEditedDirectly()/facultyOverload()
+     * notifications). Per spec Section 7 ("Do NOT generate
+     * unnecessary notifications for insignificant UI changes"), the
+     * caller (FacultyController::update()) is expected to have
+     * already filtered $changes down to the significant fields
+     * (College, status, employment type, name, faculty id) before
+     * calling this — trivial cosmetic fields (middle name, suffix,
+     * remarks, contact info) are left out there, not here, so this
+     * method's own contract stays simple: notify on whatever it's
+     * given, skip only when nothing is given at all.
+     *
+     * Same recipient set as facultyCreatedDirectly() — the central
+     * facultyRecipients() resolver: Administrator + Registrar + the
+     * Faculty's own College Dean/OIC + Assistant Dean, actor excluded.
+     *
+     * @param  list<array{field: string, old: mixed, new: mixed}>  $changes
+     */
+    public function facultyUpdatedDirectly(Faculty $faculty, User $actor, array $changes): void
+    {
+        if (empty($changes)) {
+            return;
+        }
+
+        $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
+
+        $fieldLabels = [
+            'faculty_id' => 'Faculty ID',
+            'first_name' => 'First Name',
+            'middle_name' => 'Middle Name',
+            'last_name' => 'Last Name',
+            'suffix' => 'Suffix',
+            'employment_type' => 'Employment Type',
+            'college_id' => 'College',
+            'status' => 'Status',
+            'email' => 'Email',
+            'contact_number' => 'Contact Number',
+            'remarks' => 'Remarks',
+        ];
+
+        $summary = collect($changes)
+            ->pluck('field')
+            ->map(fn (string $field) => $fieldLabels[$field] ?? Str::headline($field))
+            ->implode(', ');
+
+        foreach ($this->facultyRecipients($faculty, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_FACULTY_UPDATED_DIRECTLY,
+                priority: self::PRIORITY_INFO,
+                title: 'Faculty Information Updated',
+                message: "{$facultyName}'s {$summary} ".(count($changes) === 1 ? 'has' : 'have')." been updated by {$actor->full_name}.",
+                data: [
+                    'faculty_id' => $faculty->id,
+                    'faculty_name' => $facultyName,
+                    'college_id' => $faculty->college_id,
+                    'changes' => $changes,
+                ],
+            );
+        }
+    }
+
+    /**
+     * A Dean/OIC/Assistant Dean/Admin/Registrar added or removed
+     * Subject qualifications for a Faculty member
+     * (TeachingQualificationController::update()). Spec Section 8.
+     * Same facultyRecipients() audience as the other direct-edit
+     * notifications. Only call when $added or $removed is non-empty.
+     *
+     * @param  list<string>  $added    Subject codes newly qualified.
+     * @param  list<string>  $removed  Subject codes no longer qualified.
+     */
+    public function facultyQualificationsUpdated(Faculty $faculty, User $actor, array $added, array $removed): void
+    {
+        if (empty($added) && empty($removed)) {
+            return;
+        }
+
+        $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
+
+        foreach ($this->facultyRecipients($faculty, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_FACULTY_QUALIFICATIONS_UPDATED,
+                priority: self::PRIORITY_INFO,
+                title: 'Faculty Teaching Qualifications Updated',
+                message: "{$facultyName}'s teaching qualifications were updated by {$actor->full_name}.",
+                data: [
+                    'faculty_id' => $faculty->id,
+                    'faculty_name' => $facultyName,
+                    'college_id' => $faculty->college_id,
+                    'added_subjects' => $added,
+                    'removed_subjects' => $removed,
                 ],
             );
         }
@@ -646,7 +912,7 @@ class NotificationService
     {
         $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
 
-        foreach ($this->collegeRecipientsForFaculty($faculty, $actor) as $recipient) {
+        foreach ($this->facultyRecipients($faculty, $actor) as $recipient) {
             $this->writeNotification(
                 recipient: $recipient,
                 actor: $actor,
@@ -654,7 +920,7 @@ class NotificationService
                 priority: self::PRIORITY_IMPORTANT,
                 title: 'Faculty Deactivated',
                 message: "{$actor->full_name} deactivated {$facultyName}.",
-                data: ['faculty_name' => $facultyName],
+                data: ['faculty_id' => $faculty->id, 'faculty_name' => $facultyName, 'college_id' => $faculty->college_id],
             );
         }
 
@@ -680,15 +946,27 @@ class NotificationService
     /**
      * Admin/Registrar permanently deleted a Faculty member from the
      * roster (FacultyController@destroy — a soft delete, see that
-     * method's docblock). Notifies the Dean/OIC/Assistant Dean of
-     * that Faculty's College so they're not blindsided, and leaves an
-     * audit trail distinct from a plain deactivation.
+     * method's docblock). Notifies the full facultyRecipients() set
+     * (Registrar/Admin + that Faculty's own College Dean/OIC +
+     * Assistant Dean, actor excluded — spec Section 6/20 Example 5)
+     * so nobody on either the institution-wide or College side is
+     * blindsided, and leaves an audit trail distinct from a plain
+     * deactivation.
+     *
+     * If the Faculty still had active scheduled assignments at the
+     * time of deletion, the separate facultyAssignmentsNeedAttention()
+     * call right after this one in FacultyController@destroy escalates
+     * to CRITICAL for exactly that reason (spec Section 6: "mark the
+     * notification as HIGH PRIORITY" when existing schedules may be
+     * affected) — this notification itself stays at IMPORTANT since it
+     * is just "a Faculty record was deleted", not the schedule-impact
+     * warning.
      */
     public function facultyDeletedDirectly(Faculty $faculty, User $actor): void
     {
         $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
 
-        foreach ($this->collegeRecipientsForFaculty($faculty, $actor) as $recipient) {
+        foreach ($this->facultyRecipients($faculty, $actor) as $recipient) {
             $this->writeNotification(
                 recipient: $recipient,
                 actor: $actor,
@@ -696,7 +974,7 @@ class NotificationService
                 priority: self::PRIORITY_IMPORTANT,
                 title: 'Faculty Deleted',
                 message: "{$actor->full_name} deleted {$facultyName} from the Faculty Master.",
-                data: ['faculty_name' => $facultyName],
+                data: ['faculty_id' => $faculty->id, 'faculty_name' => $facultyName, 'college_id' => $faculty->college_id],
             );
         }
 
@@ -1002,6 +1280,60 @@ class NotificationService
     }
 
     /**
+     * CENTRAL recipient resolver for every Faculty-scoped notification
+     * (create/update/workload/overload/qualifications/deactivate/
+     * delete). This is the ONE place that decides "who is relevant to
+     * this Faculty member" — every facultyXxx() method below must
+     * route through this instead of assembling its own recipient list,
+     * so the rule never drifts between event types.
+     *
+     * College is the routing key (never the actor's role): recipients
+     * are resolved from `$faculty->college_id`, not from who performed
+     * the action. Result is always:
+     *
+     *   1. Administrator + Registrar (AccessScope::UNRESTRICTED_ROLES)
+     *      — institution-wide, every Faculty event.
+     *   2. Dean + OIC of the Faculty's own College
+     *      (AccessScope::COLLEGE_SCOPED_ROLES, filtered by
+     *      college_id) — only when the Faculty has a College. A CCS
+     *      Dean is never in this list for a CTE Faculty, and vice
+     *      versa (spec Sections 3/9/18/21).
+     *   3. Assistant Dean (AccessScope::ASSISTANT_DEAN_ROLE).
+     *
+     * NOTE on (3): the spec this resolver was written against
+     * describes a per-College "CTE Assistant Dean" / "CCS Assistant
+     * Dean". CLASSLY's actual schema has no such thing — Assistant
+     * Dean is a single institution-wide role with no `college_id`
+     * (see AccessScope::ASSISTANT_DEAN_ROLE and its class docblock:
+     * "the role limited to GenEd/Minor resources across all
+     * Colleges"). Per this method's own instruction to reuse the
+     * existing architecture rather than invent relationships, every
+     * Assistant Dean is included here regardless of the Faculty's
+     * College, exactly as the rest of this service already treats
+     * them (see collegeRecipientsForFaculty()). If CLASSLY later adds
+     * a `college_id` to the Assistant Dean role, narrow step 3 to
+     * match step 2's college_id filter.
+     *
+     * Deduped by user id, then the actor is always excluded (spec
+     * Section 11) — enforced here, once, so no caller can forget it.
+     *
+     * @return Collection<int, User>
+     */
+    private function facultyRecipients(Faculty $faculty, User $actor): Collection
+    {
+        $collegeScoped = $faculty->college_id
+            ? User::query()->role(AccessScope::COLLEGE_SCOPED_ROLES)->where('college_id', $faculty->college_id)->get()
+            : collect();
+
+        return $this->adminRecipients()
+            ->concat($collegeScoped)
+            ->concat(User::query()->role(AccessScope::ASSISTANT_DEAN_ROLE)->get())
+            ->unique('id')
+            ->reject(fn (User $u) => $u->is($actor))
+            ->values();
+    }
+
+    /**
      * @return Collection<int, User>
      */
     private function adminRecipients(): Collection
@@ -1019,6 +1351,12 @@ class NotificationService
      * mostly just be notifying the actor's own peers about the
      * actor's own action; this is specifically about reaching the
      * College-side people who had no part in it.
+     *
+     * Kept distinct from facultyRecipients() above: this one is for
+     * the narrower "just the College side" courtesy notices
+     * (facultyDeactivatedDirectly/facultyDeletedDirectly did NOT ask
+     * to be widened to full facultyRecipients() scope in this pass —
+     * only create/update/workload/overload/qualifications did).
      *
      * @return Collection<int, User>
      */

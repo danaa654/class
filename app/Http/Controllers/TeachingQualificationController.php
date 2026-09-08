@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\UpdateFacultyQualificationsRequest;
 use App\Models\Faculty;
 use App\Models\Subject;
+use App\Services\NotificationService;
 use App\Support\AccessScope;
 use Illuminate\Http\RedirectResponse;
 
@@ -16,6 +17,8 @@ use Illuminate\Http\RedirectResponse;
  */
 class TeachingQualificationController extends Controller
 {
+    public function __construct(private readonly NotificationService $notifications) {}
+
     /**
      * Sync the set of subjects a faculty member is qualified to teach.
      *
@@ -61,7 +64,18 @@ class TeachingQualificationController extends Controller
 
         $finalIds = $untouchable->merge($authorizedIncoming)->unique()->values();
 
+        // Diff by subject code (readable in a notification) BEFORE
+        // syncing, so we can tell recipients exactly what changed —
+        // spec Section 8 wants "Added subjects: ... / Removed
+        // subjects: ...", not just "qualifications changed".
+        $addedCodes = $subjectsById->only($finalIds->diff($existingIds)->all())->pluck('subject_code')->values()->all();
+        $removedCodes = $subjectsById->only($existingIds->diff($finalIds)->all())->pluck('subject_code')->values()->all();
+
         $faculty->subjects()->sync($finalIds);
+
+        if (! empty($addedCodes) || ! empty($removedCodes)) {
+            $this->notifications->facultyQualificationsUpdated($faculty, $user, $addedCodes, $removedCodes);
+        }
 
         return redirect()
             ->route('scheduling.faculty.show', $faculty)

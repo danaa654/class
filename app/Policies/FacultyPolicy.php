@@ -31,15 +31,15 @@ class FacultyPolicy
     }
 
     /**
-     * Directly creating an ACTIVE Faculty record is Admin/Registrar
-     * only (Faculty Management request workflow). Dean/OIC/Assistant
-     * Dean may never activate a new Faculty record on their own — see
-     * requestCreate() below; they submit a FacultyRequest instead,
-     * reviewed via FacultyRequestController.
+     * Directly creating an ACTIVE Faculty record. Per the current
+     * spec, every Scheduling-side role (Admin, Registrar, Dean/OIC,
+     * Assistant Dean) may add Faculty directly — there is no longer
+     * a request/approval queue for Faculty creation. Scoping to the
+     * correct College still happens via createForCollege() below.
      */
     public function create(User $user): bool
     {
-        return AccessScope::isUnrestricted($user);
+        return $user->hasAnyRole(['Administrator', 'Registrar', 'Assistant Dean', 'Dean', 'OIC']);
     }
 
     /**
@@ -133,15 +133,15 @@ class FacultyPolicy
 
     /**
      * Whether the user may directly change a Faculty member's teaching
-     * load ceiling (max_teaching_units / max_weekly_hours). Only
-     * Admin/Registrar may — Dean/OIC/Assistant Dean must submit a
-     * FacultyLoadRequest instead (see FacultyLoadRequestController).
-     * Mirrors reassignCollege(): both are "sensitive field" gates
-     * layered on top of the ordinary update() ability.
+     * load ceiling (max_teaching_units / max_weekly_hours). Per the
+     * current spec, every Scheduling-side role (Admin, Registrar,
+     * Dean/OIC, Assistant Dean) may set this directly — the
+     * FacultyLoadRequest approval queue is no longer required for
+     * this field.
      */
     public function changeMaxLoad(User $user): bool
     {
-        return AccessScope::isUnrestricted($user);
+        return $user->hasAnyRole(['Administrator', 'Registrar', 'Assistant Dean', 'Dean', 'OIC']);
     }
 
     /**

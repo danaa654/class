@@ -29,7 +29,7 @@ class FacultyLoadRequest extends Model
      * caps used when a College is short-staffed. Keep in sync with
      * UpdateFacultyRequest/StoreFacultyRequest.
      */
-    public const HARD_CAP_UNITS = 40;
+    public const HARD_CAP_UNITS = 42;
 
     /**
      * The actual ceiling a given user may request/approve up to right

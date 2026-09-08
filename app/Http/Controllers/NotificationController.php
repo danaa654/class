@@ -157,6 +157,35 @@ class NotificationController extends Controller
             return route('scheduling.faculty');
         }
 
+        // Faculty-scoped notifications (spec Section 16) — jump
+        // straight to that Faculty member's profile when we still
+        // have one to show (faculty_id is in every one of these
+        // notifications' data payload — see NotificationService's
+        // facultyXxx() methods). A deleted Faculty has no profile
+        // left to open, so those fall back to the Faculty Master list
+        // instead of a 404.
+        $facultyScopedTypes = [
+            \App\Services\NotificationService::TYPE_FACULTY_CREATED_DIRECTLY,
+            \App\Services\NotificationService::TYPE_FACULTY_UPDATED_DIRECTLY,
+            \App\Services\NotificationService::TYPE_FACULTY_WORKLOAD_UPDATED,
+            \App\Services\NotificationService::TYPE_FACULTY_OVERLOAD,
+            \App\Services\NotificationService::TYPE_FACULTY_QUALIFICATIONS_UPDATED,
+            \App\Services\NotificationService::TYPE_FACULTY_DEACTIVATED_DIRECTLY,
+            \App\Services\NotificationService::TYPE_FACULTY_ASSIGNMENTS_NEED_ATTENTION,
+        ];
+
+        if (in_array($notification->type, $facultyScopedTypes, true)) {
+            $facultyId = $notification->data['faculty_id'] ?? null;
+
+            return $facultyId
+                ? route('scheduling.faculty.show', $facultyId)
+                : route('scheduling.faculty');
+        }
+
+        if ($notification->type === \App\Services\NotificationService::TYPE_FACULTY_DELETED_DIRECTLY) {
+            return route('scheduling.faculty');
+        }
+
         // Sends the recipient straight to their own Manage Account tab
         // — Administrators manage their account from User Management,
         // everyone else from Settings (see UsersController::updateAccount()).

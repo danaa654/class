@@ -1563,6 +1563,237 @@ const onEndTimeChange = (row, value) => {
 /* saved unless every row passes. --- */
 
 const savingSchedule = ref(false);
+// Whether the CURRENT user can Override & Save a Teaching Load
+// warning (FacultyPolicy::changeMaxLoad() — Admin, Registrar, Dean,
+// OIC, Assistant Dean), as told by the last save response's
+// can_override flag. Starts false so the confirm affordance below
+// never renders before the first save attempt reports it.
+const workloadCanOverride = ref(false);
+
+// Same permission RoomGrid.vue's own "Add Units" shortcut gates on
+// (FacultyPolicy::changeMaxLoad()) — Admin/Registrar/Dean/OIC/Assistant
+// Dean get a direct write to the ceiling via the same auto-approved
+// endpoint; everyone else sees "Request more units" and it goes to
+// review instead. Mirrors RoomGrid's canChangeMaxLoad exactly so the
+// two "Add Units" entry points (Room Grid modal vs this Subjects
+// table) behave identically for the same user.
+const canChangeMaxLoad = computed(() => !!page.props.auth?.can?.changeFacultyMaxLoad);
+
+// Per-row cache of the last workload_warnings payload for that row
+// (see batchUpdateSchedule()'s $workloadWarnings / workloadWarningFor()
+// on the backend) — stateFor(id).errors.workload only keeps the
+// human-readable message, but the inline "Add Units" shortcut below
+// needs the actual faculty_id/current/max figures to prefill its
+// dialog, so they're kept here keyed by row id alongside the error.
+const workloadWarningDetails = reactive({});
+
+// "X units left (Y/Z)" label + color, and the "0 (or negative) units
+// left" gate — identical logic to RoomGrid.vue's own
+// remainingUnitsLabel()/remainingUnitsClass()/hasInsufficientUnits(),
+// duplicated here (rather than imported) because these read the
+// facultyGroupsFor() option shape (`maxUnits`/`currentLoad`), not
+// RoomGrid's own (`max_teaching_units`/`current_load`) — same numbers,
+// different option objects.
+const remainingUnitsLabel = (option) => {
+    const max = option.maxUnits;
+    const load = option.currentLoad ?? 0;
+    if (max == null) return '';
+    const remaining = max - load;
+    return `${remaining} unit${remaining === 1 ? '' : 's'} left (${load}/${max})`;
+};
+
+const remainingUnitsClass = (option) => {
+    const max = option.maxUnits;
+    if (max == null) return 'text-slate-400';
+    const remaining = max - (option.currentLoad ?? 0);
+    if (remaining <= 0) return 'text-red-500 font-medium';
+    if (remaining <= 3) return 'text-amber-600';
+    return 'text-slate-400';
+};
+
+const hasInsufficientUnits = (option) => {
+    if (option.maxUnits == null) return false;
+    return option.maxUnits - (option.currentLoad ?? 0) <= 0;
+};
+
+// Inline "Add Units" / "Request more units" shortcut — the Subjects
+// tab's equivalent of RoomGrid's openLoadRequestDialog(), reused from
+// two places: (1) the Faculty dropdown's own option row, the same
+// on-ramp Room Grid's "Schedule Subject" modal offers right where a
+// Dean/OIC discovers a faculty member is already full (Image 2), and
+// (2) a saved row's Teaching Load warning banner, for a faculty
+// already assigned before their ceiling got tight. Same endpoint,
+// same approval rules, same auto-approve-vs-pending split as
+// RoomGrid — this only differs in WHERE it can be triggered from and
+// which local caches it patches afterward.
+//
+// facultyId/facultyName/currentMax/currentLoad describe the faculty
+// member directly; rowId is optional and only supplied by the warning
+// banner path, so its cached workloadWarningDetails/errors.workload
+// can be cleared once the ceiling is raised.
+const openAddUnitsDialog = async ({ facultyId, facultyName, currentMax, currentLoad, rowId = null }) => {
+    if (!facultyId) return;
+
+    // Same floor as RoomGrid's openLoadRequestDialog(): never offer a
+    // default that would still leave "units left" negative, even if
+    // this faculty is already over their own ceiling.
+    const minRequestable = Math.max((currentMax ?? 0) + 1, currentLoad ?? 0);
+
+    if (minRequestable > props.hardCapUnits) {
+        toast.add({
+            severity: 'error',
+            summary: 'Cannot request',
+            detail: `${facultyName ?? 'This faculty member'}'s current teaching load (${currentLoad ?? 0}) already exceeds the institution-wide ceiling (${props.hardCapUnits} units). Raise the ceiling under Settings > Faculty & Workload, or reduce their assigned load, before requesting a change here.`,
+            life: 8000,
+        });
+        return;
+    }
+
+    const defaultRequested = Math.min(minRequestable, props.hardCapUnits);
+
+    const { value: formValues } = await Swal.fire({
+        icon: 'question',
+        title: canChangeMaxLoad.value ? 'Add Units' : 'Request More Units',
+        html: `
+            <div class="text-left text-sm space-y-3">
+                <div class="text-slate-500">
+                    ${facultyName ?? 'This faculty member'}'s current ceiling is ${currentMax ?? 0} unit(s)${(currentLoad ?? 0) > (currentMax ?? 0) ? `, but they're already assigned ${currentLoad} unit(s) of actual teaching load` : ''}.
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Requested Max Teaching Units</label>
+                    <input id="swal-load-units-row" type="number" class="swal2-input !m-0 !w-full" min="${minRequestable}" max="${props.hardCapUnits}" value="${defaultRequested}" />
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Reason</label>
+                    <textarea id="swal-load-reason-row" class="swal2-textarea !m-0 !w-full" rows="3" placeholder="Why does this faculty member need a higher teaching load? (min. 10 characters)"></textarea>
+                </div>
+            </div>
+        `,
+        showCancelButton: true,
+        confirmButtonText: canChangeMaxLoad.value ? 'Add Units' : 'Submit Request',
+        cancelButtonText: 'Cancel',
+        focusConfirm: false,
+        preConfirm: () => {
+            const units = Number(document.getElementById('swal-load-units-row')?.value);
+            const reason = (document.getElementById('swal-load-reason-row')?.value ?? '').trim();
+
+            if (!units || units < minRequestable) {
+                Swal.showValidationMessage(
+                    (currentLoad ?? 0) > (currentMax ?? 0)
+                        ? `Requested units must be at least ${minRequestable} — below this faculty member's actual current teaching load (${currentLoad}), the units-left count would still show negative.`
+                        : `Requested units must be higher than the current maximum (${currentMax ?? 0}).`,
+                );
+                return false;
+            }
+            if (units > props.hardCapUnits) {
+                Swal.showValidationMessage(`Requests above ${props.hardCapUnits} units cannot be submitted — that is the current maximum teaching load ceiling.`);
+                return false;
+            }
+            if (reason.length < 10) {
+                Swal.showValidationMessage('Please give a bit more detail — a one-word reason isn\'t enough for the reviewer to approve this.');
+                return false;
+            }
+            return { units, reason };
+        },
+    });
+
+    if (!formValues) return;
+
+    try {
+        const response = await fetch(route('scheduling.faculty-load-requests.store'), {
+            method: 'POST',
+            headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+                'X-XSRF-TOKEN': csrfToken(),
+            },
+            body: JSON.stringify({
+                faculty_id: facultyId,
+                requested_max_teaching_units: formValues.units,
+                reason: formValues.reason,
+            }),
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+            const detail = data.errors
+                ? Object.values(data.errors).flat().join(' ')
+                : (data.message ?? 'Could not submit the request.');
+            toast.add({ severity: 'error', summary: 'Could not submit', detail, life: 7000 });
+            return;
+        }
+
+        if (data.auto_approved) {
+            // Same in-place patch RoomGrid does — activeFaculty is the
+            // same reactive prop this page passed to RoomGrid, so
+            // every "units left" label fed by it (including this
+            // page's own Faculty dropdown, mid-open) updates
+            // immediately, with no full page reload.
+            const target = props.activeFaculty.find((f) => f.id === facultyId);
+            if (target) {
+                if (data.max_teaching_units != null) target.max_teaching_units = data.max_teaching_units;
+                if (data.max_weekly_hours != null) target.max_weekly_hours = data.max_weekly_hours;
+            }
+            Object.values(recommendations).forEach((entry) => {
+                const recMatch = entry?.faculty?.recommendations?.find((r) => r.id === facultyId);
+                if (recMatch && data.max_teaching_units != null) recMatch.max_teaching_units = data.max_teaching_units;
+            });
+
+            // If this came from a saved row's warning banner, the
+            // ceiling is now high enough for that row's existing
+            // assignment, so the stale warning (and its cached
+            // details) can clear — re-saving will pass on its own,
+            // with no Override needed.
+            if (rowId != null) {
+                delete stateFor(rowId).errors.workload;
+                delete workloadWarningDetails[rowId];
+            }
+
+            toast.add({ severity: 'success', summary: 'Units added', detail: data.message ?? 'Faculty load ceiling updated.', life: 5000 });
+            return;
+        }
+
+        toast.add({
+            severity: 'warn',
+            summary: 'Pending approval',
+            detail: `${data.message ?? 'Load change request submitted for review.'} This faculty member still can't be assigned until it's approved.`,
+            life: 8000,
+        });
+    } catch (e) {
+        toast.add({ severity: 'error', summary: 'Error', detail: 'Could not submit the request.', life: 5000 });
+    }
+};
+
+// Row warning banner's "Add Units" — pulls the faculty_id/current/max
+// cached from the last save's workload_warnings for this row (see
+// workloadWarningDetails above) and threads them into the shared
+// dialog, preferring activeFaculty's live numbers when available in
+// case they've since moved (e.g. another row's Add Units already
+// raised this same faculty's ceiling).
+const openAddUnitsForRow = (rowId) => {
+    const warning = workloadWarningDetails[rowId];
+    if (!warning?.faculty_id) return;
+    const liveFaculty = props.activeFaculty.find((f) => f.id === warning.faculty_id);
+    openAddUnitsDialog({
+        facultyId: warning.faculty_id,
+        facultyName: warning.faculty_name,
+        currentMax: liveFaculty?.max_teaching_units ?? warning.max ?? 0,
+        currentLoad: liveFaculty?.current_load ?? warning.current ?? 0,
+        rowId,
+    });
+};
+
+// Faculty dropdown's own "Add Units" — reachable straight from a full
+// faculty's option row (see the #option template below), same as
+// RoomGrid's "Schedule Subject" modal already offers.
+const openAddUnitsForOption = (option) => {
+    openAddUnitsDialog({
+        facultyId: option.value,
+        facultyName: option.label,
+        currentMax: option.maxUnits,
+        currentLoad: option.currentLoad,
+    });
+};
 
 const validateRowsClientSide = () => {
     let valid = true;
@@ -1611,6 +1842,28 @@ const printSectionSchedule = () => {
         }),
         '_blank',
     );
+};
+
+// WORKLOAD OVERRIDE — Subjects tab equivalent of the Room Grid's
+// "Proceed Anyway" (see RoomGrid.vue's writeSchedule()). Unlike
+// Capacity/Hours/Room Type/Room College/Faculty Mismatch above,
+// this warning can only be known AFTER the server rejects a save
+// (it depends on the Faculty's actual current load across every
+// OTHER section too, not just what's visible in this table), so it
+// can't be pre-checked client-side the way those are — the flow is
+// reactive: attempt Save, server skips the row and reports it via
+// workload_warnings, THEN the Dean/Registrar/Admin/OIC/Assistant
+// Dean confirms it right here and retries. Previously this warning
+// text had no action at all — the row would just keep getting
+// silently skipped on every subsequent Save attempt with no way out
+// except deleting/reassigning the row, even for a user who has
+// every right to override it.
+const confirmWorkloadOverride = (rowId) => {
+    stateFor(rowId).workloadConfirmed = true;
+    stateFor(rowId).errors.workload = null;
+    dirtyRowIds.value.add(rowId);
+
+    return saveSchedule();
 };
 
 const saveSchedule = async () => {
@@ -1862,11 +2115,87 @@ const saveSchedule = async () => {
             return;
         }
 
-        // FACULTY WORKLOAD VALIDATION — "Save Schedule Validation".
-        // The server rejects with 409 and lists every faculty member
-        // who'd exceed their Maximum Teaching Load. Only an
-        // Administrator can acknowledge and resubmit with
-        // workload_confirmed=true per affected row.
+        // FACULTY WORKLOAD VALIDATION — "Save Schedule Validation"
+        // (SectionSubjectController::workloadWarningFor()). A row
+        // whose Faculty would exceed their Teaching Load ceiling is
+        // skipped from the write, but batchUpdateSchedule() still
+        // returns 200 (partial save) whenever at least one OTHER row
+        // saved fine, or 422 only if EVERY row in the batch was
+        // skipped — never 409. Show the same "Conflict / Proceed
+        // Anyway" modal Room Grid's own writeSchedule() pops for the
+        // exact same warning, right here, instead of only surfacing a
+        // "Partially saved" toast + inline row banner with no
+        // immediate way to actually finish saving those rows.
+        if (data.workload_warnings && Object.keys(data.workload_warnings).length > 0) {
+            const warnings = Object.values(data.workload_warnings);
+            const canOverride = Boolean(data.can_override);
+
+            const result = await Swal.fire({
+                icon: canOverride ? 'warning' : 'error',
+                title: 'Conflict',
+                html:
+                    '<div class="text-left text-sm space-y-2">'
+                    + warnings.map((w) => `<div>${w.message ?? `${w.faculty_name} would exceed their allowable teaching load.`}</div>`).join('')
+                    + (canOverride
+                        ? ''
+                        : '<p class="mt-2 text-red-600">Only an Administrator, Registrar, Dean, OIC, or Assistant Dean may override this.</p>')
+                    + '</div>',
+                showCancelButton: canOverride,
+                confirmButtonText: canOverride ? 'Proceed Anyway' : 'OK',
+                cancelButtonText: 'Cancel',
+                confirmButtonColor: '#dc2626',
+            });
+
+            if (canOverride && result.isConfirmed) {
+                // BUG FIX — the first submit() above already committed
+                // a PARTIAL save (every row without a conflict) and
+                // bumped the Section's schedule_version server-side
+                // (batchUpdateSchedule() bumps the version whenever
+                // ANY row changed, not just on a full success). A
+                // naive retry here would still send the STALE version
+                // this page loaded with, so the backend's own
+                // concurrency guard would reject the retry outright
+                // as a 409 SCHEDULE_VERSION_CONFLICT — silently
+                // undoing "Proceed Anyway" with no visible save and
+                // no further error, which is exactly the bug this
+                // fixes. Adopt the version the first submit just
+                // produced, and resync every row's fields from what
+                // actually landed in the database, BEFORE resubmitting
+                // — same two steps the full success path below
+                // performs anyway, just done early so the retry's own
+                // expected_schedule_version and payload are both
+                // already up to date.
+                if (typeof data.schedule_version === 'number') {
+                    schedulePolling.acceptVersion(data.schedule_version);
+                }
+                rows.value.forEach((row) => {
+                    const fresh = data.sectionSubjects?.find((r) => r.id === row.id);
+                    if (fresh) {
+                        Object.assign(row, { ...fresh, days: toDaysArray(fresh.days) });
+                    }
+                });
+
+                // Same override flag confirmWorkloadOverride()/the row
+                // banner's "Confirm & Save Anyway" already sets — mark
+                // every warned row confirmed and resubmit the WHOLE
+                // batch once more so this save actually finishes in
+                // one action, the same way clicking "Proceed Anyway"
+                // on Room Grid immediately re-writes the assignment
+                // rather than leaving the Registrar to press Save a
+                // second time.
+                Object.keys(data.workload_warnings).forEach((rowId) => {
+                    stateFor(Number(rowId)).workloadConfirmed = true;
+                });
+
+                ({ response, data } = await submit());
+            }
+            // Not overridable, or the Registrar cancelled — fall
+            // through to the normal partial-save handling below,
+            // which still highlights these exact rows via
+            // data.workload_warnings/errors.workload so nothing is
+            // silently lost, just not auto-retried.
+        }
+
         if (response.status === 409 && data.workload_warnings) {
             const warnings = Object.values(data.workload_warnings);
             const canOverride = Boolean(data.can_override);
@@ -1884,7 +2213,7 @@ const saveSchedule = async () => {
                         .join('') +
                     (canOverride
                         ? '<p class="mt-2">Please resolve these conflicts or override manually.</p>'
-                        : '<p class="mt-2 text-red-600">Only an Administrator may override this validation.</p>') +
+                        : '<p class="mt-2 text-red-600">Only an Administrator, Registrar, Dean, OIC, or Assistant Dean may override this validation.</p>') +
                     '</div>',
                 showCancelButton: canOverride,
                 confirmButtonText: canOverride ? 'Override & Save' : 'OK',
@@ -1956,9 +2285,14 @@ const saveSchedule = async () => {
         // never actually highlighted on the table, leaving no visible
         // sign of which rows need attention.
         if (data.workload_warnings) {
+            workloadCanOverride.value = Boolean(data.can_override);
+
             Object.entries(data.workload_warnings).forEach(([rowId, warning]) => {
                 stateFor(Number(rowId)).errors.workload = warning.message
                     ?? `${warning.faculty_name} would exceed their allowable teaching load. Confirm to save anyway.`;
+                // Cached for openAddUnitsForRow()'s inline "Add Units"
+                // shortcut — see its declaration above.
+                workloadWarningDetails[Number(rowId)] = warning;
             });
         }
 
@@ -3394,19 +3728,35 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                                         <span class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-400">{{ option.label }}</span>
                                                     </template>
                                                     <template #option="{ option }">
-                                                        <div class="flex items-center justify-between gap-2 w-full" :class="{ 'italic text-slate-400': option.disabled }">
-                                                            <span class="text-xs">{{ option.label }}</span>
-                                                            <span v-if="!option.disabled" class="flex items-center gap-1 shrink-0">
-                                                                <span
-                                                                    v-if="option.maxUnits"
-                                                                    class="text-[0.65rem] text-slate-400 whitespace-nowrap"
-                                                                    :title="'Teaching Load: ' + (option.currentLoad ?? 0) + ' / ' + option.maxUnits + ' units'"
-                                                                >
-                                                                    {{ option.currentLoad ?? 0 }}/{{ option.maxUnits }} units
+                                                        <div class="flex flex-col gap-0.5 py-0.5 w-full" :class="{ 'italic text-slate-400': option.disabled }">
+                                                            <div class="flex items-center justify-between gap-2">
+                                                                <span class="text-xs">{{ option.label }}</span>
+                                                                <span v-if="!option.disabled" class="flex items-center gap-1 shrink-0">
+                                                                    <Tag v-if="option.confidence" :value="option.confidence" :severity="confidenceSeverity(option.confidence)" class="!text-[0.6rem] !py-0.5" />
+                                                                    <Tag v-else-if="option.bestMatch" value="Best Match" severity="success" class="!text-[0.6rem] !py-0.5" />
                                                                 </span>
-                                                                <Tag v-if="option.confidence" :value="option.confidence" :severity="confidenceSeverity(option.confidence)" class="!text-[0.6rem] !py-0.5" />
-                                                                <Tag v-else-if="option.bestMatch" value="Best Match" severity="success" class="!text-[0.6rem] !py-0.5" />
-                                                            </span>
+                                                            </div>
+                                                            <div v-if="!option.disabled && option.maxUnits != null" class="flex items-center gap-1.5">
+                                                                <span class="text-[0.65rem]" :class="remainingUnitsClass(option)">
+                                                                    {{ remainingUnitsLabel(option) }}
+                                                                </span>
+                                                                <!-- No legitimate way to pick this Faculty
+                                                                     member as-is (0 units left) without first
+                                                                     raising their ceiling — same inline
+                                                                     request/approval on-ramp RoomGrid's
+                                                                     "Schedule Subject" modal offers.
+                                                                     mousedown.stop (not click.stop) so this
+                                                                     fires before PrimeVue's own option-select
+                                                                     handler. -->
+                                                                <button
+                                                                    v-if="hasInsufficientUnits(option)"
+                                                                    type="button"
+                                                                    class="text-[0.65rem] font-medium text-blue-500 hover:text-blue-600 underline"
+                                                                    @mousedown.stop.prevent="openAddUnitsForOption(option)"
+                                                                >
+                                                                    {{ canChangeMaxLoad ? 'Add Units' : 'Request more units' }}
+                                                                </button>
+                                                            </div>
                                                         </div>
                                                     </template>
                                                 </Select>
@@ -3612,6 +3962,18 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                     </p>
                                     <p v-if="stateFor(data.id).errors.workload" class="text-red-500 text-xs mt-1">
                                         <i class="pi pi-exclamation-triangle mr-1"></i>{{ stateFor(data.id).errors.workload }}
+                                        <a
+                                            v-if="workloadCanOverride"
+                                            href="#"
+                                            class="underline font-medium ml-1"
+                                            @click.prevent="confirmWorkloadOverride(data.id)"
+                                        >Confirm &amp; Save Anyway</a>
+                                        <a
+                                            v-if="workloadWarningDetails[data.id]"
+                                            href="#"
+                                            class="underline font-medium ml-1"
+                                            @click.prevent="openAddUnitsForRow(data.id)"
+                                        >{{ canChangeMaxLoad ? 'Add Units' : 'Request more units' }}</a>
                                     </p>
                                 </div>
                             </template>

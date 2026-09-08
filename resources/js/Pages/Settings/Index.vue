@@ -362,6 +362,11 @@ const onUpdateAccount = () => {
 
                                 <fieldset :disabled="!canEdit('workload')" class="grid grid-cols-1 sm:grid-cols-4 gap-5">
                                     <FloatLabel variant="on">
+                                        <!-- Capped at 42 to match FacultyLoadRequest::HARD_CAP_UNITS
+                                             (the institution-wide hard ceiling enforced server-side on
+                                             every overload request) — never raise this without also
+                                             raising HARD_CAP_UNITS, or the form will accept a value the
+                                             backend will just reject/clamp anyway. -->
                                         <InputNumber id="maxLoad" size="large" v-model="workloadForm.max_teaching_load" class="w-full" :min="1" :max="42" />
                                         <label for="maxLoad">Max Teaching Load (units/hrs)</label>
                                     </FloatLabel>

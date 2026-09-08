@@ -652,9 +652,10 @@ const writeSchedule = async (subjectId, payload, { successMessage, crossSection 
         // it).
         if (response.status === 409 && data.workload_warning) {
             if (data.can_override) {
-                // Administrator — same message the backend already
-                // computed, just given a real "Proceed Anyway" action
-                // instead of dead-ending.
+                // Anyone with changeMaxLoad access (Administrator,
+                // Registrar, Dean, OIC, Assistant Dean) — same message
+                // the backend already computed, just given a real
+                // "Proceed Anyway" action instead of dead-ending.
                 const result = await Swal.fire({
                     icon: 'warning',
                     title: 'Conflict',

@@ -8,7 +8,7 @@ use App\Models\Faculty;
 use App\Models\FacultyLoadRequest;
 use App\Services\FacultyWorkloadService;
 use App\Services\NotificationService;
-use App\Support\AccessScope;
+use App\Services\ActivityLogService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -17,12 +17,14 @@ use Illuminate\Support\Facades\DB;
  * Workflow for raising a Faculty member's teaching load ceiling when a
  * College is short-staffed.
  *
- * Admin/Registrar can still edit Faculty::max_teaching_units /
- * max_weekly_hours directly (FacultyController@update, gated by
- * FacultyPolicy::changeMaxLoad). Dean/OIC/Assistant Dean have NO direct
- * write path to those fields — this controller is the only door in for
- * them: submit a reasoned request, Admin/Registrar approves or denies.
- * Approval is the only thing that actually mutates the Faculty record.
+ * Anyone with changeMaxLoad access (Administrator, Registrar, Dean,
+ * OIC, or Assistant Dean — see FacultyPolicy::changeMaxLoad()) can
+ * also edit Faculty::max_teaching_units / max_weekly_hours directly
+ * (FacultyController@update). This controller is the shared entry
+ * point for both: a changeMaxLoad holder's own submission here is
+ * applied immediately (self-approved, same as review() below), while
+ * anyone else's creates a Pending FacultyLoadRequest that sits in the
+ * queue until a changeMaxLoad holder reviews it.
  *
  * The review queue itself is now rendered inside FacultyController@index
  * (a section on the Faculty page) rather than its own screen — this
@@ -33,23 +35,25 @@ class FacultyLoadRequestController extends Controller
     public function __construct(
         private readonly NotificationService $notifications,
         private readonly FacultyWorkloadService $workloadService,
+        private readonly ActivityLogService $activityLog,
     ) {}
 
     /**
      * Submit a new load change for a Faculty member.
      *
-     * Dean/OIC/Assistant Dean have NO direct write path to
+     * Anyone WITHOUT changeMaxLoad access has no direct write path to
      * max_teaching_units/max_weekly_hours — for them this always
      * creates a Pending FacultyLoadRequest that sits in the queue
-     * until Admin/Registrar reviews it.
+     * until a changeMaxLoad holder (Admin, Registrar, Dean, OIC, or
+     * Assistant Dean) reviews it.
      *
-     * Admin/Registrar, on the other hand, already have a direct edit
-     * path (FacultyController@update, gated by
+     * A changeMaxLoad holder, on the other hand, already has a direct
+     * edit path (FacultyController@update, gated by the same
      * FacultyPolicy::changeMaxLoad) — routing their own submission
      * through here as another Pending request would just mean they
-     * (or another admin) has to separately go approve their own
+     * (or another reviewer) has to separately go approve their own
      * change before it takes effect, which is a no-op approval step,
-     * not a real review. So when the actor is Admin/Registrar, this
+     * not a real review. So when the actor holds changeMaxLoad, this
      * applies the change immediately: the record is created already
      * Approved/self-reviewed and the Faculty row is updated in the
      * same transaction, same as review() below.
@@ -93,7 +97,7 @@ class FacultyLoadRequestController extends Controller
                 : back()->withErrors(['requested_max_teaching_units' => $message])->withInput();
         }
 
-        $actorIsReviewer = AccessScope::isUnrestricted($request->user());
+        $actorIsReviewer = $request->user()->can('changeMaxLoad', Faculty::class);
         $cap = FacultyLoadRequest::effectiveCapFor($request->user());
 
         // SAFETY NET — BUG FIX: Admin/Registrar's request is auto-approved
@@ -175,6 +179,13 @@ class FacultyLoadRequestController extends Controller
                     'max_weekly_hours' => $requestedHours ?? $faculty->max_weekly_hours,
                 ]);
 
+                $this->activityLog->record(
+                    ActivityLogService::FACULTY_UPDATED,
+                    "{$request->user()->full_name} added teaching load units for {$faculty->full_name} ({$faculty->max_teaching_units} → {$units} units).",
+                    $faculty,
+                    $request->user(),
+                );
+
                 // No Pending step, so there's no separate reviewer to
                 // notify — but the Dean/OIC of this faculty's College
                 // still needs to know their faculty member's ceiling
@@ -184,6 +195,13 @@ class FacultyLoadRequestController extends Controller
 
                 return;
             }
+
+            $this->activityLog->record(
+                ActivityLogService::FACULTY_UPDATED,
+                "{$request->user()->full_name} requested a teaching load increase for {$faculty->full_name}.",
+                $faculty,
+                $request->user(),
+            );
 
             $this->notifications->facultyLoadRequestSubmitted($loadRequest, $request->user());
         });
@@ -225,10 +243,12 @@ class FacultyLoadRequestController extends Controller
     }
 
     /**
-     * Admin/Registrar approves or denies a pending request. Approval
-     * is the ONLY place outside FacultyController@update (Admin/
-     * Registrar direct edit) that Faculty::max_teaching_units /
-     * max_weekly_hours may change.
+     * Admin/Registrar approves or denies a pending request from a
+     * Dean/OIC/Assistant Dean (or anyone else without changeMaxLoad
+     * access). Approval is the ONLY place outside FacultyController@
+     * update (a changeMaxLoad holder's direct edit) or this
+     * controller's own store() auto-approve path that
+     * Faculty::max_teaching_units / max_weekly_hours may change.
      */
     public function review(ReviewFacultyLoadRequestRequest $request, FacultyLoadRequest $facultyLoadRequest): RedirectResponse
     {
@@ -274,6 +294,13 @@ class FacultyLoadRequestController extends Controller
                 'reviewed_at' => now(),
                 'decision_note' => $data['decision_note'] ?? null,
             ]);
+
+            $this->activityLog->record(
+                ActivityLogService::FACULTY_UPDATED,
+                "{$request->user()->full_name} {$data['decision']} a teaching load request for {$facultyLoadRequest->faculty->full_name}.",
+                $facultyLoadRequest->faculty,
+                $request->user(),
+            );
 
             $this->notifications->facultyLoadRequestReviewed($facultyLoadRequest, $request->user());
         });

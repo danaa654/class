@@ -5,6 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\College;
 use App\Models\Section;
 use App\Models\SectionSubject;
+use App\Models\Faculty;
+use App\Models\ActivityLog;
+use App\Services\ActivityLogService;
+use App\Support\AccessScope;
 use App\Support\ViewingTerm;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -146,8 +150,13 @@ class SchedulingController extends Controller
             ->filter(fn ($c) => $c['total'] > 0)
             ->values();
 
-        // Recent activity: most recently updated placements, newest first.
-        $recentActivity = SectionSubject::query()
+        // Recent activity: most recently updated placements (Faculty/
+        // Room/Time assignments) merged with Faculty roster events
+        // (added, units changed, workload overridden — spec: Dean's
+        // direct "Add Faculty"/"Add Units" should surface here too,
+        // not just in Settings > Activity Log), newest first across
+        // both sources.
+        $placementActivity = SectionSubject::query()
             ->whereIn('section_id', $sectionIds)
             ->with(['section:id,section_code', 'subject:id,subject_title'])
             ->orderByDesc('updated_at')
@@ -158,7 +167,47 @@ class SchedulingController extends Controller
                     ? "Scheduled {$ss->section?->section_code} — {$ss->subject?->subject_title}"
                     : "Updated {$ss->section?->section_code} — {$ss->subject?->subject_title}",
                 'status' => $ss->status,
-                'updated_at' => optional($ss->updated_at)->diffForHumans(),
+                'updated_at' => $ss->updated_at,
+                'sort_at' => $ss->updated_at,
+            ]);
+
+        // Same college scoping as everything else on this dashboard —
+        // null means unrestricted (Admin/Registrar see every college's
+        // Faculty events too), a Dean/OIC/Assistant Dean only sees
+        // their own college's (or, for Assistant Dean, the
+        // no-college/GenEd pool's — see visibleCollegeIds()'s docblock).
+        $visibleCollegeIds = AccessScope::visibleCollegeIds(auth()->user());
+
+        $facultyActivityQuery = ActivityLog::query()
+            ->where('subject_type', Faculty::class)
+            ->whereIn('action', [ActivityLogService::FACULTY_CREATED, ActivityLogService::FACULTY_UPDATED])
+            ->with('subject')
+            ->orderByDesc('created_at')
+            ->take(8)
+            ->get();
+
+        if ($visibleCollegeIds !== null) {
+            $facultyActivityQuery = $facultyActivityQuery->filter(
+                fn ($log) => $log->subject && in_array($log->subject->college_id, $visibleCollegeIds, true)
+            );
+        }
+
+        $facultyActivity = $facultyActivityQuery
+            ->map(fn ($log) => [
+                'label' => $log->description,
+                'status' => null,
+                'updated_at' => $log->created_at,
+                'sort_at' => $log->created_at,
+            ]);
+
+        $recentActivity = $placementActivity
+            ->concat($facultyActivity)
+            ->sortByDesc('sort_at')
+            ->take(8)
+            ->map(fn ($item) => [
+                'label' => $item['label'],
+                'status' => $item['status'],
+                'updated_at' => optional($item['updated_at'])->diffForHumans(),
             ])
             ->values();
 

@@ -26,6 +26,7 @@ use App\Services\IrregularSectionMergeService;
 use App\Services\RecommendationService;
 use App\Services\RoomUtilizationService;
 use App\Services\NotificationService;
+use App\Services\ActivityLogService;
 use App\Services\ScheduleConflictService;
 use App\Support\AccessScope;
 use Closure;
@@ -49,7 +50,8 @@ class SectionSubjectController extends Controller implements HasMiddleware
         private readonly FacultyWorkloadService $workloadService,
         private readonly RoomUtilizationService $roomUtilizationService,
         private readonly IrregularSectionMergeService $mergeService,
-        private readonly NotificationService $notifications
+        private readonly NotificationService $notifications,
+        private readonly ActivityLogService $activityLog
     ) {
     }
 
@@ -842,12 +844,18 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // MANUAL ASSIGNMENT VALIDATION — Faculty Workload. Not a hard
         // conflict (see workloadWarningFor()'s docblock): the Registrar
         // gets a 409 "Teaching Load Limit Exceeded" warning the first
-        // time, and only an Administrator can resubmit with
-        // workload_confirmed=true to Override & Save.
+        // time, and anyone who can also raise this Faculty member's
+        // load ceiling (FacultyPolicy::changeMaxLoad() — Admin,
+        // Registrar, Dean, OIC, Assistant Dean) can resubmit with
+        // workload_confirmed=true to Override & Save. This mirrors
+        // changeMaxLoad() deliberately: overriding the cap on Save and
+        // raising the cap itself are the same underlying trust
+        // decision, so a role that already holds one shouldn't be
+        // blocked from the other.
         $workloadWarning = $this->workloadWarningFor($facultyId, $subject->subject, $subject->id);
 
         if ($workloadWarning) {
-            $canOverride = (bool) $request->user()?->hasRole('Administrator');
+            $canOverride = (bool) $request->user()?->can('changeMaxLoad', Faculty::class);
             $confirmed = $request->boolean('workload_confirmed');
 
             if (! $canOverride || ! $confirmed) {
@@ -856,7 +864,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                     'can_override' => $canOverride,
                     'message' => $canOverride
                         ? 'This assignment exceeds the faculty\'s allowable workload. Proceed anyway?'
-                        : 'This assignment exceeds the faculty\'s allowable workload. Only an Administrator may override this validation.',
+                        : 'This assignment exceeds the faculty\'s allowable workload. Only an Administrator, Registrar, Dean, OIC, or Assistant Dean may override this validation.',
                 ], 409);
             }
         }
@@ -1033,8 +1041,10 @@ class SectionSubjectController extends Controller implements HasMiddleware
                     $this->mergeService->applyReverseMerge($subject, $mergeTarget);
                 }
 
-                // AUTO-RAISE CEILING — an Administrator's "Proceed
-                // Anyway" above intentionally only writes the
+                // AUTO-RAISE CEILING — a "Proceed Anyway" override
+                // above (now available to anyone with changeMaxLoad
+                // access — Admin, Registrar, Dean, OIC, Assistant Dean,
+                // not just Administrator) intentionally only writes the
                 // schedule; workload_confirmed is a one-time "yes, I
                 // know this exceeds their cap, schedule it anyway"
                 // override, NOT a request to raise max_teaching_units
@@ -1076,7 +1086,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                                 'requested_max_teaching_units' => $newCeiling,
                                 'current_max_weekly_hours' => $lockedFaculty->max_weekly_hours,
                                 'requested_max_weekly_hours' => $lockedFaculty->max_weekly_hours,
-                                'reason' => "Auto-raised: Administrator overrode the Teaching Load Limit warning while scheduling {$workloadWarning['subject_code']}.",
+                                'reason' => "Auto-raised: {$request->user()->full_name} overrode the Teaching Load Limit warning while scheduling {$workloadWarning['subject_code']}.",
                                 'status' => 'Approved',
                                 'requested_by' => $request->user()->id,
                                 'reviewed_by' => $request->user()->id,
@@ -1149,6 +1159,34 @@ class SectionSubjectController extends Controller implements HasMiddleware
         $changes = $this->diffScheduleSnapshot($beforeSnapshot, $subject);
         if (! empty($changes) && $subject->section) {
             $this->notifications->scheduleUpdated($subject->section, $subject, $request->user(), $changes);
+        }
+
+        // WORKLOAD OVERRIDE AUDIT — someone with changeMaxLoad access
+        // (Admin, Registrar, Dean, OIC, or Assistant Dean) just
+        // confirmed past the "exceeds allowable workload" warning
+        // above. This is distinct from the AUTO-RAISE CEILING
+        // notification a few lines up (which only fires when the
+        // ceiling itself actually moved) — this one fires every time
+        // the override is used, logged and notified to the full
+        // facultyRecipients() audience (Admin/Registrar + this
+        // Faculty's own College Dean/OIC + Assistant Dean, actor
+        // excluded) so the override itself is never invisible even on
+        // the (rare) save where the ceiling didn't need to move.
+        if ($workloadWarning) {
+            $facultyForOverride = \App\Models\Faculty::find($workloadWarning['faculty_id']);
+
+            if ($facultyForOverride) {
+                $facultyName = trim(($facultyForOverride->first_name ?? '').' '.($facultyForOverride->last_name ?? ''));
+
+                $this->activityLog->record(
+                    ActivityLogService::SCHEDULE_UPDATED,
+                    "{$request->user()->full_name} overrode the teaching load limit warning to schedule {$facultyName} for {$workloadWarning['subject_code']}.",
+                    $subject,
+                    $request->user(),
+                );
+
+                $this->notifications->facultyWorkloadOverridden($facultyForOverride, $subject, $request->user(), $workloadWarning);
+            }
         }
 
         return response()->json([
@@ -2507,7 +2545,17 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // sending the frontend two conflicting patches for the same
         // Faculty.
         $raisedFacultyLoads = [];
-        $isAdministrator = (bool) $request->user()?->hasRole('Administrator');
+        // WORKLOAD OVERRIDE AUDIT — one entry per row this batch
+        // overrode, collected here (inside the transaction, alongside
+        // $raisedFacultyLoads above) and logged/notified only after
+        // DB::commit() succeeds — see the block right after the
+        // try/catch below, mirroring updateSchedule()'s equivalent.
+        $workloadOverrides = [];
+        // Same underlying trust decision as updateSchedule()'s equivalent
+        // — anyone who can raise this Faculty's load ceiling
+        // (FacultyPolicy::changeMaxLoad() — Admin, Registrar, Dean, OIC,
+        // Assistant Dean) can also confirm past the warning here.
+        $canOverrideWorkload = (bool) $request->user()?->can('changeMaxLoad', Faculty::class);
         $expectedVersion = $request->filled('expected_schedule_version')
             ? (int) $request->input('expected_schedule_version')
             : null;
@@ -2717,17 +2765,18 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 // SAVE SCHEDULE VALIDATION — Faculty Workload. A final
                 // pass for every assigned faculty before this batch
                 // commits. Not folded into the hard-conflict $errors
-                // list above — per spec, an Administrator may
-                // "Override & Save" — so it's tracked separately and
-                // only blocks the row when nobody has confirmed it (or
-                // the confirming user isn't an Administrator).
+                // list above — anyone with changeMaxLoad access (Admin,
+                // Registrar, Dean, OIC, Assistant Dean) may "Override &
+                // Save" — so it's tracked separately and only blocks
+                // the row when nobody has confirmed it (or the
+                // confirming user doesn't hold changeMaxLoad).
                 $workloadWarning = $this->workloadWarningFor($facultyId, $subject->subject, $subject->id);
                 $isWorkloadOverride = false;
 
                 if ($workloadWarning) {
                     $confirmed = ! empty($rowData['workload_confirmed']);
 
-                    if (! $isAdministrator || ! $confirmed) {
+                    if (! $canOverrideWorkload || ! $confirmed) {
                         // Same PARTIAL SAVE rule as overlap errors above —
                         // this subject is skipped, everyone else in the
                         // batch still saves.
@@ -2738,6 +2787,12 @@ class SectionSubjectController extends Controller implements HasMiddleware
                     }
 
                     $isWorkloadOverride = true;
+                    $workloadOverrides[] = [
+                        'faculty_id' => $workloadWarning['faculty_id'],
+                        'subject_code' => $workloadWarning['subject_code'],
+                        'section_subject_id' => $subject->id,
+                        'projected' => $workloadWarning['projected'] ?? null,
+                    ];
                 }
 
                 // Same Practicum/OJT exemption as updateSchedule() above
@@ -2803,7 +2858,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                                 'requested_max_teaching_units' => $newCeiling,
                                 'current_max_weekly_hours' => $lockedFaculty->max_weekly_hours,
                                 'requested_max_weekly_hours' => $lockedFaculty->max_weekly_hours,
-                                'reason' => "Auto-raised: Administrator overrode the Teaching Load Limit warning while batch-scheduling {$workloadWarning['subject_code']}.",
+                                'reason' => "Auto-raised: {$request->user()->full_name} overrode the Teaching Load Limit warning while batch-scheduling {$workloadWarning['subject_code']}.",
                                 'status' => 'Approved',
                                 'requested_by' => $request->user()->id,
                                 'reviewed_by' => $request->user()->id,
@@ -2840,7 +2895,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 return response()->json([
                     'errors' => $errors,
                     'workload_warnings' => $workloadWarnings,
-                    'can_override' => $isAdministrator,
+                    'can_override' => $canOverrideWorkload,
                     'message' => 'Every row in this batch has a scheduling conflict. Nothing was saved.',
                 ], 422);
             }
@@ -2878,6 +2933,40 @@ class SectionSubjectController extends Controller implements HasMiddleware
             ->whereIn('id', $rowIds)
             ->get();
 
+        // WORKLOAD OVERRIDE AUDIT — same event as updateSchedule()'s
+        // equivalent, logged/notified once per overridden row now that
+        // the batch has actually committed. Faculty rows are fetched
+        // once and reused across duplicate overrides of the same
+        // Faculty within this batch, rather than re-querying per row.
+        if (! empty($workloadOverrides)) {
+            $overriddenFaculty = \App\Models\Faculty::whereIn(
+                'id',
+                collect($workloadOverrides)->pluck('faculty_id')->unique()
+            )->get()->keyBy('id');
+
+            foreach ($workloadOverrides as $override) {
+                $facultyForOverride = $overriddenFaculty->get($override['faculty_id']);
+
+                if (! $facultyForOverride) {
+                    continue;
+                }
+
+                $facultyName = trim(($facultyForOverride->first_name ?? '').' '.($facultyForOverride->last_name ?? ''));
+                $overriddenSubject = $fresh->firstWhere('id', $override['section_subject_id']);
+
+                $this->activityLog->record(
+                    ActivityLogService::SCHEDULE_UPDATED,
+                    "{$request->user()->full_name} overrode the teaching load limit warning to schedule {$facultyName} for {$override['subject_code']}.",
+                    $overriddenSubject,
+                    $request->user(),
+                );
+
+                if ($overriddenSubject) {
+                    $this->notifications->facultyWorkloadOverridden($facultyForOverride, $overriddenSubject, $request->user(), $override);
+                }
+            }
+        }
+
         $message = empty($skippedIds)
             ? 'Schedule saved successfully.'
             : count($savedIds).' of '.count($rowIds).' subjects saved. '
@@ -2893,6 +2982,14 @@ class SectionSubjectController extends Controller implements HasMiddleware
             // rows genuinely weren't written.
             'errors' => $errors,
             'workload_warnings' => $workloadWarnings,
+            // Was previously only sent on the "everything skipped" 422
+            // below — meaning a PARTIAL save (some rows saved, others
+            // skipped for exceeding workload) left the Subjects tab with
+            // no way to know an override was even available, unlike the
+            // Room Grid's equivalent 409 flow which always includes it.
+            // The frontend needs this on every response carrying
+            // workload_warnings, not just the all-skipped case.
+            'can_override' => $canOverrideWorkload,
             'saved_ids' => $savedIds,
             'skipped_ids' => $skippedIds,
             'message' => $message,
