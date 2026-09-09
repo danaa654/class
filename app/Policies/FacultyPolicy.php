@@ -27,6 +27,17 @@ class FacultyPolicy
             return true;
         }
 
+        // A College-scoped Dean/OIC may open ANY faculty's detail page
+        // read-only via the Faculty Master "All Faculty" filter (see
+        // Faculty::scopeVisibleTo()'s $allColleges param) — the page
+        // itself hides the Edit button and re-checks update()/
+        // manageQualification() for write actions, so allowing the
+        // read here doesn't grant anything beyond what that list
+        // already showed them.
+        if (AccessScope::isCollegeScoped($user)) {
+            return true;
+        }
+
         return $this->canAccess($user, $faculty);
     }
 
@@ -55,8 +66,15 @@ class FacultyPolicy
             return true;
         }
 
-        if (AccessScope::isAssistantDean($user)) {
-            return $collegeId === null;
+        // GenEd/Minor faculty (no College) is Assistant Dean's lane —
+        // covers both a pure Assistant Dean and a Dean/OIC additionally
+        // flagged with GenEd/Minor authority (is_gened_assistant_dean).
+        // Checked by the TARGET college being null, not by the user's
+        // role alone — otherwise a flagged Dean/OIC creating a Faculty
+        // for their OWN College would wrongly hit this branch and be
+        // rejected, since isAssistantDean($user) is also true for them.
+        if ($collegeId === null) {
+            return AccessScope::isAssistantDean($user);
         }
 
         if (AccessScope::isCollegeScoped($user)) {
@@ -74,8 +92,11 @@ class FacultyPolicy
      */
     public function requestCreate(User $user, ?int $collegeId): bool
     {
-        if (AccessScope::isAssistantDean($user)) {
-            return $collegeId === null;
+        // Same fix as createForCollege() above — branch on the TARGET
+        // college being null, not on the user's role, so a flagged
+        // Dean/OIC isn't blocked from their own College.
+        if ($collegeId === null) {
+            return AccessScope::isAssistantDean($user);
         }
 
         if (AccessScope::isCollegeScoped($user)) {
@@ -93,8 +114,12 @@ class FacultyPolicy
      */
     public function requestDeactivate(User $user, Faculty $faculty): bool
     {
-        if (AccessScope::isAssistantDean($user)) {
-            return $faculty->college_id === null;
+        // Same fix as createForCollege() above — branch on the
+        // FACULTY's own college_id being null, not on the user's
+        // role, so a flagged Dean/OIC isn't blocked from their own
+        // College's faculty.
+        if ($faculty->college_id === null) {
+            return AccessScope::isAssistantDean($user);
         }
 
         if (AccessScope::isCollegeScoped($user)) {
@@ -172,8 +197,14 @@ class FacultyPolicy
         // Assistant Dean's lane is GenEd/Minor faculty, represented in
         // this codebase as a Faculty record with no college_id (see
         // FacultyController's "General Education Faculty" filter).
-        if (AccessScope::isAssistantDean($user)) {
-            return $faculty->college_id === null;
+        // Branch on the FACULTY's college_id being null, not on the
+        // user's role — a Dean/OIC additionally flagged with GenEd/
+        // Minor authority (is_gened_assistant_dean) also passes
+        // isAssistantDean(), so checking the role first would wrongly
+        // block them from editing their OWN College's faculty (a
+        // non-null college_id would fail the old `=== null` check).
+        if ($faculty->college_id === null) {
+            return AccessScope::isAssistantDean($user);
         }
 
         if (AccessScope::isCollegeScoped($user)) {

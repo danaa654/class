@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\ImportFacultyRequest;
 use App\Http\Requests\StoreFacultyRequest;
 use App\Http\Requests\UpdateFacultyRequest;
 use App\Models\College;
@@ -15,14 +16,22 @@ use App\Services\FacultyWorkloadService;
 use App\Services\NotificationService;
 use App\Support\AccessScope;
 use App\Support\ViewingTerm;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class FacultyController extends Controller
 {
+    /** Shared by nextFacultyId()/nextFacultyIdNumber() and import()'s batch auto-numbering. */
+    private const FACULTY_ID_PREFIX = 'FAC-';
+
     public function __construct(
         private readonly FacultyWorkloadService $workloadService,
         private readonly NotificationService $notifications,
@@ -54,6 +63,30 @@ class FacultyController extends Controller
     }
 
     /**
+     * Colleges the "Department Faculty"/"All Faculty" college
+     * sub-filter should offer. Distinct from selectableColleges()
+     * above (which gates where a NEW faculty record may be created) —
+     * this instead mirrors what Faculty::scopeVisibleTo() actually
+     * lets this user SEE: every active College for
+     * Admin/Registrar/Assistant Dean (including a Dean/OIC additionally
+     * flagged with GenEd/Minor authority), or just their own single
+     * College otherwise. The frontend only renders the dropdown when
+     * this list has more than one entry — for a single-College
+     * viewer it would be a no-op filter.
+     */
+    private function viewableCollegesForFilter(?User $user)
+    {
+        return College::query()
+            ->where('status', 'Active')
+            ->when(
+                ! AccessScope::isUnrestricted($user) && ! AccessScope::isAssistantDean($user) && AccessScope::isCollegeScoped($user),
+                fn ($query) => $query->where('id', $user->college_id),
+            )
+            ->orderBy('name')
+            ->get(['id', 'name']);
+    }
+
+    /**
      * Display the Faculty Master page.
      *
      * Faculty members here are NOT system users — they never log in.
@@ -67,10 +100,31 @@ class FacultyController extends Controller
 
         $search = trim((string) $request->query('faculty_search', ''));
         $category = $request->query('faculty_category', '');
-        $category = in_array($category, ['Department Faculty', 'General Education Faculty'], true) ? $category : '';
+        $category = in_array($category, ['Department Faculty', 'General Education Faculty', 'All Faculty'], true) ? $category : '';
+
+        // "All Faculty" is a SCOPE toggle, not a category filter — it
+        // lifts the College restriction for a Dean/OIC so they can
+        // browse the institution-wide roster (read-mostly; edit/delete
+        // on rows outside their own College is still blocked by
+        // FacultyPolicy — see canEdit/canDelete below). For every
+        // other role this changes nothing since they already see the
+        // full roster regardless.
+        $viewAllColleges = $category === 'All Faculty';
+
+        // Secondary "College" narrowing — only meaningful under
+        // "Department Faculty"/"All Faculty" (GenEd has no college_id
+        // to filter by). Only ever effective for a viewer who can see
+        // more than one College under the current scope (Admin,
+        // Registrar, Assistant Dean, or a Dean/OIC additionally
+        // flagged with GenEd/Minor authority — see
+        // viewableCollegesForFilter()); a plain single-College Dean/OIC
+        // sending this is a no-op since scopeVisibleTo already narrows
+        // them to their own College regardless.
+        $collegeFilter = $request->query('faculty_college_id');
+        $collegeFilter = is_numeric($collegeFilter) ? (int) $collegeFilter : null;
 
         $faculties = Faculty::query()
-            ->visibleTo($request->user())
+            ->visibleTo($request->user(), $viewAllColleges)
             ->with(['college' => fn ($query) => $query->withTrashed()])
             ->when($search !== '', function ($query) use ($search) {
                 $query->where(function ($inner) use ($search) {
@@ -82,9 +136,10 @@ class FacultyController extends Controller
                         });
                 });
             })
-            ->when($category !== '', fn ($query) => $category === 'General Education Faculty'
+            ->when(in_array($category, ['Department Faculty', 'General Education Faculty'], true), fn ($query) => $category === 'General Education Faculty'
                 ? $query->whereNull('college_id')
                 : $query->whereNotNull('college_id'))
+            ->when($collegeFilter !== null && $category !== 'General Education Faculty', fn ($query) => $query->where('college_id', $collegeFilter))
             ->orderBy('last_name')
             ->orderBy('first_name')
             ->paginate(10, ['*'], 'faculty_page')
@@ -105,17 +160,43 @@ class FacultyController extends Controller
         // evaluateMany()'s doc comment on FacultyWorkloadService.
         $workloads = $this->workloadService->evaluateMany($faculties->getCollection());
 
-        $faculties->getCollection()->transform(function (Faculty $faculty) use ($workloads) {
+        $faculties->getCollection()->transform(function (Faculty $faculty) use ($workloads, $request) {
             $faculty->setAttribute('workload', $workloads[$faculty->id] ?? $this->workloadService->evaluate($faculty));
+
+            // Row-level write permissions — needed because the "All
+            // Faculty" scope above can now surface rows outside the
+            // viewer's own College (read-only for those rows). Kept
+            // per-row (not a single page-wide flag) since a Dean/OIC
+            // browsing "All Faculty" CAN edit their own College's rows
+            // and CANNOT edit everyone else's in the same table.
+            $faculty->setAttribute('canEdit', $request->user()->can('update', $faculty));
+            $faculty->setAttribute('canDelete', $request->user()->can('delete', $faculty));
 
             return $faculty;
         });
 
         return Inertia::render('Scheduling/Faculty/Index', [
             'faculties' => $faculties,
-            'filters' => ['faculty_search' => $search, 'faculty_category' => $category],
+            'filters' => [
+                'faculty_search' => $search,
+                'faculty_category' => $category,
+                'faculty_college_id' => $collegeFilter,
+            ],
             'colleges' => $this->selectableColleges($request->user()),
+            // Colleges the viewer may narrow the "Department Faculty"/
+            // "All Faculty" list down to — see viewableCollegesForFilter().
+            // Deliberately separate from 'colleges' above (which is the
+            // narrower "what College may THIS user create a faculty
+            // record under" list) since filtering-to-view and
+            // creating-into are different questions with different scopes.
+            'filterColleges' => $this->viewableCollegesForFilter($request->user()),
             'nextFacultyId' => $this->nextFacultyId(),
+
+            // Lets the frontend offer the "All Faculty" filter option
+            // only to Dean/OIC — Admin/Registrar/Assistant Dean already
+            // see the full roster by default, so the option would be
+            // redundant (and slightly misleading) for them.
+            'isCollegeScopedViewer' => AccessScope::isCollegeScoped($request->user()),
 
             // Faculty creation/load-edit are now direct actions for
             // every Scheduling-side role (Admin, Registrar, Dean/OIC,
@@ -123,6 +204,11 @@ class FacultyController extends Controller
             // changeMaxLoad(). There is no longer a Faculty Load
             // Request or Faculty (Creation/Deletion) Request queue.
             'canCreateFacultyDirectly' => $request->user()->can('create', Faculty::class),
+            // Gates the Bulk Import button/dialog — same underlying
+            // ability as manually adding one Faculty member
+            // (FacultyPolicy::create()), since Import is just a
+            // faster way to do the same thing many rows at a time.
+            'canImportFacultyDirectly' => $request->user()->can('create', Faculty::class),
             'hardCapUnits' => FacultyLoadRequest::effectiveCapFor($request->user()),
         ]);
     }
@@ -158,11 +244,33 @@ class FacultyController extends Controller
             'deactivationImpact' => $this->workloadService->deactivationImpact($faculty),
             'canDeactivateDirectly' => $user->can('delete', $faculty),
             'canRequestDeactivation' => $user->can('requestDeactivate', $faculty),
+            // Gates the "Edit Information" button — needed now that a
+            // Dean/OIC can open another College's faculty profile from
+            // the "All Faculty" filter (FacultyController::index) and
+            // land here read-only. See FacultyPolicy::canAccess().
+            'canEdit' => $user->can('update', $faculty),
             'colleges' => $this->selectableColleges($user),
+            // Ordered by RELEVANCE to this faculty member, not just
+            // alphabetically — a Dean qualifying their own faculty
+            // shouldn't have to scroll past every other College's
+            // subjects to reach their own. Tiers: (1) this faculty's
+            // own College's Major subjects, (2) shared GenEd/Minor
+            // subjects, (3) every other College's Major subjects.
+            // subject_code order is preserved within each tier since
+            // sortBy() is a stable sort over an already-ordered list.
+            // This is purely a DISPLAY convenience — selection is not
+            // restricted here; write-time authorization still happens
+            // in updateQualifications() via SubjectPolicy/manageQualification.
             'subjects' => Subject::query()
                 ->where('is_active', true)
                 ->orderBy('subject_code')
-                ->get(['id', 'subject_code', 'subject_title', 'category', 'units']),
+                ->get(['id', 'subject_code', 'subject_title', 'category', 'units', 'college_id'])
+                ->sortBy(fn (Subject $subject) => match (true) {
+                    $subject->category === 'Major' && $subject->college_id === $faculty->college_id => 0,
+                    AccessScope::isSharedCategory($subject->category) => 1,
+                    default => 2,
+                })
+                ->values(),
             // Same cap the Faculty Master (Index) edit modal uses — needed
             // here so the Details page's own Edit Faculty modal can bound
             // the Maximum Teaching Units field the same way instead of
@@ -404,7 +512,20 @@ class FacultyController extends Controller
      */
     private function nextFacultyId(): string
     {
-        $prefix = 'FAC-';
+        return $this->formatFacultyId($this->nextFacultyIdNumber());
+    }
+
+    /**
+     * The next sequential number after whatever is currently the
+     * highest FAC-NNNN on the roster (including soft-deleted rows, so
+     * a deleted faculty's ID is never reissued). Split out from
+     * nextFacultyId() so import() can seed its own running counter
+     * from the same starting point without duplicating the
+     * numeric-aware lookup query.
+     */
+    private function nextFacultyIdNumber(): int
+    {
+        $prefix = self::FACULTY_ID_PREFIX;
 
         $lastId = Faculty::withTrashed()
             ->where('faculty_id', 'like', "{$prefix}%")
@@ -414,10 +535,578 @@ class FacultyController extends Controller
             ->orderByRaw('CAST(SUBSTRING(faculty_id, ?) AS UNSIGNED) DESC', [strlen($prefix) + 1])
             ->value('faculty_id');
 
-        $nextNumber = $lastId
+        return $lastId
             ? ((int) substr($lastId, strlen($prefix))) + 1
             : 1;
+    }
 
-        return $prefix.str_pad((string) $nextNumber, 4, '0', STR_PAD_LEFT);
+    private function formatFacultyId(int $number): string
+    {
+        return self::FACULTY_ID_PREFIX.str_pad((string) $number, 4, '0', STR_PAD_LEFT);
+    }
+
+    /**
+     * Human-readable College label for a CSV row, for display purposes
+     * only (never used for validation — validateImportRow()/
+     * duplicateFacultyMessage() resolve the actual college_id
+     * separately). Blank column = General Education (no College); an
+     * unresolvable code is returned upper-cased as-typed so a reviewer
+     * can immediately see what they entered even when it's invalid.
+     */
+    private function resolveCollegeLabel(array $data, $colleges): ?string
+    {
+        $code = trim((string) ($data['college'] ?? ''));
+        if ($code === '') {
+            return null;
+        }
+
+        $college = $colleges->get(Str::lower($code));
+
+        return $college ? $college->name : Str::upper($code);
+    }
+
+    /**
+     * Downloadable CSV template for the Faculty Master's Bulk Import —
+     * column headers plus one example row, so a registrar spreadsheet
+     * has an exact target shape to copy into rather than guessing
+     * column names from the docs. Mirrors
+     * RoomController::importTemplate() / SubjectController::importTemplate().
+     */
+    public function importTemplate(): StreamedResponse
+    {
+        $this->authorize('create', Faculty::class);
+
+        $columns = [
+            'faculty_id', 'first_name', 'middle_name', 'last_name', 'suffix',
+            'employment_type', 'college', 'max_teaching_units', 'workload_type',
+            'max_weekly_hours', 'status', 'email', 'contact_number', 'remarks',
+        ];
+
+        $example = [
+            '', 'Juan', '', 'Dela Cruz', '',
+            'Full-time', 'CCS', '24', 'units',
+            '', 'Active', 'juan.delacruz@example.edu', '09171234567', '',
+        ];
+
+        return response()->streamDownload(function () use ($columns, $example) {
+            $handle = fopen('php://output', 'w');
+            fputcsv($handle, $columns);
+            fputcsv($handle, $example);
+            fclose($handle);
+        }, 'classly-faculty-import-template.csv', ['Content-Type' => 'text/csv']);
+    }
+
+    /**
+     * Bulk Import — Faculty Master.
+     *
+     * Adding a whole department's worth of Faculty one at a time
+     * through the Add Faculty dialog doesn't scale. This reads a CSV
+     * (template above), validates each row independently — mirroring
+     * StoreFacultyRequest's rules exactly, so an imported row can
+     * never end up with looser validation than a manually-added one —
+     * and creates whichever rows pass. Rows that fail are reported
+     * back with their line number and reason; they never block the
+     * rows that DID pass. Same created/skipped/error shape as
+     * RoomController::import() / SubjectController::import().
+     */
+    public function import(ImportFacultyRequest $request): RedirectResponse
+    {
+        $this->authorize('create', Faculty::class);
+
+        $path = $request->file('file')->getRealPath();
+        $handle = fopen($path, 'r');
+
+        if ($handle === false) {
+            return redirect()->route('scheduling.faculty')->with('error', 'Could not read the uploaded file. Please try again.');
+        }
+
+        $header = $this->readImportHeader($handle);
+        if ($header === null) {
+            fclose($handle);
+
+            return redirect()->route('scheduling.faculty')->with('error', 'The uploaded file is empty.');
+        }
+        if (is_array($header) && isset($header['error'])) {
+            fclose($handle);
+
+            return redirect()->route('scheduling.faculty')->with('error', $header['error']);
+        }
+
+        $colleges = College::query()->get(['id', 'code', 'name'])->keyBy(fn ($c) => Str::lower($c->code));
+
+        // Same rule as store()/update(): only a viewer with
+        // changeMaxLoad access (Admin, Registrar, Dean, OIC, Assistant
+        // Dean) may set a load ceiling above the system default via
+        // Import — anyone else has every imported row silently pinned
+        // to the default regardless of what the CSV says.
+        $canChangeMaxLoad = $request->user()->can('changeMaxLoad', Faculty::class);
+        $hardCapUnits = FacultyLoadRequest::effectiveCapFor($request->user());
+
+        // faculty_id is optional in the CSV — most bulk adds won't
+        // supply one, same as the Add Faculty form pre-filling (but
+        // allowing override of) a suggested ID. $usedIds seeds that
+        // auto-numbering with every ID already in the database
+        // (including soft-deleted, so a deleted faculty's ID is never
+        // reissued) so an auto-generated ID can never collide with an
+        // existing one, and also tracks every row already created
+        // earlier in this same import.
+        $usedIds = Faculty::withTrashed()->pluck('faculty_id')
+            ->map(fn ($id) => Str::lower($id))
+            ->flip()
+            ->map(fn () => true)
+            ->all();
+        $nextIdNumber = $this->nextFacultyIdNumber();
+
+        // "Already exists" for import purposes means either an
+        // explicit faculty_id in the CSV that's already on the
+        // roster, or a Faculty Name + College combination that's
+        // already on the roster — the same near-duplicate signal a
+        // registrar would use to spot a re-added row by eye.
+        $existingByName = Faculty::withTrashed()->get(['first_name', 'last_name', 'college_id'])
+            ->map(fn (Faculty $f) => Str::lower(trim($f->first_name)).'|'.Str::lower(trim($f->last_name)).'|'.($f->college_id ?? 'none'))
+            ->flip()
+            ->map(fn () => true)
+            ->all();
+
+        $created = [];
+        $skipped = [];
+        $errors = [];
+        $rowNumber = 1; // header is row 1; data starts at row 2
+
+        while (($row = fgetcsv($handle)) !== false) {
+            $rowNumber++;
+
+            if (count(array_filter($row, fn ($v) => trim((string) $v) !== '')) === 0) {
+                continue;
+            }
+
+            $data = array_combine($header, array_pad($row, count($header), null));
+            $data = array_map(fn ($v) => is_string($v) ? trim($v) : $v, $data);
+
+            $explicitId = trim((string) ($data['faculty_id'] ?? ''));
+            if ($explicitId !== '' && isset($usedIds[Str::lower($explicitId)])) {
+                $skipped[] = [
+                    'row' => $rowNumber,
+                    'faculty_id' => $explicitId,
+                    'name' => trim(($data['first_name'] ?? '').' '.($data['last_name'] ?? '')),
+                    'college' => $this->resolveCollegeLabel($data, $colleges),
+                    'reason' => 'A faculty member with this Faculty ID already exists — it will be skipped.',
+                ];
+
+                continue;
+            }
+
+            $duplicateReason = $this->duplicateFacultyMessage($data, $colleges, $existingByName);
+            if ($duplicateReason !== null) {
+                $skipped[] = [
+                    'row' => $rowNumber,
+                    'faculty_id' => $explicitId ?: null,
+                    'name' => trim(($data['first_name'] ?? '').' '.($data['last_name'] ?? '')),
+                    'college' => $this->resolveCollegeLabel($data, $colleges),
+                    'reason' => $duplicateReason,
+                ];
+
+                continue;
+            }
+
+            try {
+                $attributes = $this->validateImportRow($data, $colleges, $canChangeMaxLoad, $hardCapUnits, $request->user());
+
+                if ($explicitId !== '') {
+                    $attributes['faculty_id'] = $explicitId;
+                    $usedIds[Str::lower($explicitId)] = true;
+                } else {
+                    $attributes['faculty_id'] = $this->formatFacultyId($nextIdNumber);
+                    while (isset($usedIds[Str::lower($attributes['faculty_id'])])) {
+                        $nextIdNumber++;
+                        $attributes['faculty_id'] = $this->formatFacultyId($nextIdNumber);
+                    }
+                    $usedIds[Str::lower($attributes['faculty_id'])] = true;
+                    $nextIdNumber++;
+                }
+
+                $faculty = Faculty::create($attributes);
+                $created[] = $faculty;
+
+                $nameKey = Str::lower(trim($attributes['first_name'])).'|'.Str::lower(trim($attributes['last_name'])).'|'.($attributes['college_id'] ?? 'none');
+                $existingByName[$nameKey] = true;
+            } catch (\InvalidArgumentException $e) {
+                $errors[] = [
+                    'row' => $rowNumber,
+                    'faculty_id' => $explicitId ?: null,
+                    'name' => trim(($data['first_name'] ?? '').' '.($data['last_name'] ?? '')),
+                    'college' => $this->resolveCollegeLabel($data, $colleges),
+                    'message' => $e->getMessage(),
+                ];
+            }
+        }
+
+        fclose($handle);
+
+        // Every created row goes through the same "new hire" notify
+        // as a manual Add Faculty (facultyCreatedDirectly()), and the
+        // same Activity Log entry — the roster/notification/audit
+        // history should never be able to tell the difference between
+        // a faculty member added via Import vs. the Add Faculty
+        // dialog.
+        foreach ($created as $faculty) {
+            $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
+
+            $this->activityLog->record(
+                ActivityLogService::FACULTY_CREATED,
+                "{$request->user()->full_name} added faculty member {$facultyName} (bulk import).",
+                $faculty,
+                $request->user(),
+            );
+
+            $this->notifications->facultyCreatedDirectly($faculty, $request->user());
+        }
+
+        $createdCount = count($created);
+        $skippedCount = count($skipped);
+        $errorCount = count($errors);
+
+        $flash = [];
+        if ($createdCount > 0) {
+            $flash['success'] = $createdCount === 1
+                ? '1 faculty member imported successfully.'
+                : "{$createdCount} faculty members imported successfully.";
+        }
+        if ($skippedCount > 0) {
+            $flash['success'] = trim(($flash['success'] ?? '').' '.(
+                $skippedCount === 1
+                    ? '1 faculty member already existed and was skipped.'
+                    : "{$skippedCount} faculty members already existed and were skipped."
+            ));
+        }
+        if ($errorCount > 0) {
+            $flash['error'] = $createdCount > 0 || $skippedCount > 0
+                ? "{$errorCount} row(s) could not be imported — see details below."
+                : "None of the {$errorCount} row(s) could be imported — see details below.";
+        }
+        if ($createdCount === 0 && $skippedCount === 0 && $errorCount === 0) {
+            $flash['error'] = 'The file had no data rows to import.';
+        }
+
+        $flash['facultyImportErrors'] = $errors;
+        $flash['facultyImportSkipped'] = $skipped;
+
+        return redirect()->route('scheduling.faculty')->with($flash);
+    }
+
+    /**
+     * Read-only overview of a CSV before anything is saved — same
+     * "New / Already Exists / Invalid" preview the Room Master's/
+     * Subject Library's Bulk Import gives, run through the exact same
+     * per-row validation as import() but never persisting anything.
+     */
+    public function preview(ImportFacultyRequest $request): JsonResponse
+    {
+        $this->authorize('create', Faculty::class);
+
+        $path = $request->file('file')->getRealPath();
+        $handle = fopen($path, 'r');
+
+        if ($handle === false) {
+            return response()->json(['error' => 'Could not read the uploaded file. Please try again.'], 422);
+        }
+
+        $header = $this->readImportHeader($handle);
+        if ($header === null) {
+            fclose($handle);
+
+            return response()->json(['error' => 'The uploaded file is empty.'], 422);
+        }
+        if (is_array($header) && isset($header['error'])) {
+            fclose($handle);
+
+            return response()->json(['error' => $header['error']], 422);
+        }
+
+        $colleges = College::query()->get(['id', 'code', 'name'])->keyBy(fn ($c) => Str::lower($c->code));
+        $canChangeMaxLoad = $request->user()->can('changeMaxLoad', Faculty::class);
+        $hardCapUnits = FacultyLoadRequest::effectiveCapFor($request->user());
+
+        $usedIds = Faculty::withTrashed()->pluck('faculty_id')
+            ->map(fn ($id) => Str::lower($id))
+            ->flip()
+            ->map(fn () => true)
+            ->all();
+
+        $existingByName = Faculty::withTrashed()->get(['first_name', 'last_name', 'college_id'])
+            ->map(fn (Faculty $f) => Str::lower(trim($f->first_name)).'|'.Str::lower(trim($f->last_name)).'|'.($f->college_id ?? 'none'))
+            ->flip()
+            ->map(fn () => true)
+            ->all();
+
+        $rows = [];
+        $rowNumber = 1;
+
+        while (($row = fgetcsv($handle)) !== false) {
+            $rowNumber++;
+
+            if (count(array_filter($row, fn ($v) => trim((string) $v) !== '')) === 0) {
+                continue;
+            }
+
+            $data = array_combine($header, array_pad($row, count($header), null));
+            $data = array_map(fn ($v) => is_string($v) ? trim($v) : $v, $data);
+            $name = trim(($data['first_name'] ?? '').' '.($data['last_name'] ?? ''));
+            $collegeLabel = $this->resolveCollegeLabel($data, $colleges);
+
+            $explicitId = trim((string) ($data['faculty_id'] ?? ''));
+            if ($explicitId !== '' && isset($usedIds[Str::lower($explicitId)])) {
+                $rows[] = [
+                    'row' => $rowNumber,
+                    'faculty_id' => $explicitId,
+                    'name' => $name,
+                    'college' => $collegeLabel,
+                    'status' => 'exists',
+                    'message' => 'A faculty member with this Faculty ID already exists — it will be skipped.',
+                ];
+
+                continue;
+            }
+
+            $duplicateReason = $this->duplicateFacultyMessage($data, $colleges, $existingByName);
+            if ($duplicateReason !== null) {
+                $rows[] = [
+                    'row' => $rowNumber,
+                    'faculty_id' => $explicitId ?: null,
+                    'name' => $name,
+                    'college' => $collegeLabel,
+                    'status' => 'exists',
+                    'message' => $duplicateReason,
+                ];
+
+                continue;
+            }
+
+            try {
+                $attributes = $this->validateImportRow($data, $colleges, $canChangeMaxLoad, $hardCapUnits, $request->user());
+
+                $rows[] = [
+                    'row' => $rowNumber,
+                    'faculty_id' => $explicitId ?: null,
+                    'name' => $name,
+                    'college' => $collegeLabel,
+                    'status' => 'new',
+                    'message' => null,
+                ];
+
+                $nameKey = Str::lower(trim($attributes['first_name'])).'|'.Str::lower(trim($attributes['last_name'])).'|'.($attributes['college_id'] ?? 'none');
+                $existingByName[$nameKey] = true;
+            } catch (\InvalidArgumentException $e) {
+                $rows[] = [
+                    'row' => $rowNumber,
+                    'faculty_id' => $explicitId ?: null,
+                    'name' => $name,
+                    'college' => $collegeLabel,
+                    'status' => 'error',
+                    'message' => $e->getMessage(),
+                ];
+            }
+
+            if ($explicitId !== '') {
+                $usedIds[Str::lower($explicitId)] = true;
+            }
+        }
+
+        fclose($handle);
+
+        return response()->json([
+            'rows' => $rows,
+            'summary' => [
+                'new' => count(array_filter($rows, fn ($r) => $r['status'] === 'new')),
+                'exists' => count(array_filter($rows, fn ($r) => $r['status'] === 'exists')),
+                'error' => count(array_filter($rows, fn ($r) => $r['status'] === 'error')),
+            ],
+        ]);
+    }
+
+    /**
+     * Parse and validate the CSV header row, shared by import() and
+     * preview() so the two never drift apart on what counts as a
+     * readable file.
+     *
+     * @return array<int, string>|array{error: string}|null null = empty file, ['error' => ...] = bad header, otherwise the normalized header
+     */
+    private function readImportHeader($handle): array|null
+    {
+        $header = fgetcsv($handle);
+        if ($header === false) {
+            return null;
+        }
+
+        $header = array_map(fn ($col) => Str::slug((string) $col, '_'), $header);
+
+        $required = ['first_name', 'last_name', 'employment_type'];
+        $missing = array_diff($required, $header);
+
+        if (! empty($missing)) {
+            // Columns that only ever appear in the Room Master's or
+            // Subject Library's Bulk Import templates — if any show
+            // up here, the person almost certainly picked the wrong
+            // file rather than mistyped a Faculty column, so say that
+            // plainly instead of just listing what's "missing" from a
+            // file that was never meant to be a Faculty CSV.
+            $roomOnlyColumns = ['room_name', 'building', 'room_type', 'capacity'];
+            if (! empty(array_intersect($roomOnlyColumns, $header))) {
+                return ['error' => 'This looks like a Rooms CSV, not a Faculty CSV. Please upload a file exported for Faculty import — download the template below for the exact expected format.'];
+            }
+            $subjectOnlyColumns = ['subject_code', 'subject_title', 'lecture_hours', 'laboratory_hours', 'subject_type'];
+            if (! empty(array_intersect($subjectOnlyColumns, $header))) {
+                return ['error' => 'This looks like a Subjects CSV, not a Faculty CSV. Please upload a file exported for Faculty import — download the template below for the exact expected format.'];
+            }
+
+            return ['error' => 'The CSV is missing required column(s): '.implode(', ', $missing).'. Download the template for the exact expected format.'];
+        }
+
+        return $header;
+    }
+
+    /**
+     * Validate + normalize one CSV row into Faculty::create()-ready
+     * attributes, mirroring StoreFacultyRequest's rules exactly (minus
+     * faculty_id, which import handles separately — see import()'s
+     * doc comment) so an imported row is never held to looser
+     * standards than a manually added one. Throws
+     * InvalidArgumentException with a human-readable reason on any
+     * failure — caught by both import() and preview().
+     *
+     * College scope is enforced here too, via the same
+     * FacultyPolicy::createForCollege() a manual Add Faculty already
+     * goes through — a College-scoped Dean/OIC can only import rows
+     * for their own College (plus GenEd/Minor if additionally flagged
+     * is_gened_assistant_dean), and a plain Assistant Dean can only
+     * import GenEd/Minor (blank-college) rows. Import was previously
+     * only gated by the coarse `create` ability, which let a
+     * CSV's `college` column place rows outside a scoped viewer's
+     * own College — something the Add Faculty form never allowed.
+     *
+     * @return array<string, mixed>
+     */
+    private function validateImportRow(array $data, $colleges, bool $canChangeMaxLoad, int $hardCapUnits, User $user): array
+    {
+        $firstName = trim((string) ($data['first_name'] ?? ''));
+        $lastName = trim((string) ($data['last_name'] ?? ''));
+        $employmentType = trim((string) ($data['employment_type'] ?? ''));
+        $status = trim((string) ($data['status'] ?? '')) ?: 'Active';
+
+        $validator = Validator::make(
+            [
+                'first_name' => $firstName,
+                'last_name' => $lastName,
+                'employment_type' => $employmentType,
+                'status' => $status,
+                'email' => trim((string) ($data['email'] ?? '')) ?: null,
+                'max_weekly_hours' => trim((string) ($data['max_weekly_hours'] ?? '')) !== '' ? $data['max_weekly_hours'] : null,
+            ],
+            [
+                'first_name' => ['required', 'string', 'max:100'],
+                'last_name' => ['required', 'string', 'max:100'],
+                'employment_type' => ['required', Rule::in(['Full-time', 'Part-time'])],
+                'status' => ['required', Rule::in(['Active', 'Inactive'])],
+                'email' => ['nullable', 'email', 'max:255'],
+                'max_weekly_hours' => ['nullable', 'integer', 'min:0', 'max:168'],
+            ]
+        );
+
+        if ($validator->fails()) {
+            throw new \InvalidArgumentException(implode(' ', $validator->errors()->all()));
+        }
+
+        // college_id = null means General Education Faculty (no
+        // Department), same meaning as leaving the College field
+        // blank on the Add/Edit Faculty form.
+        $collegeId = null;
+        $collegeCode = (string) ($data['college'] ?? '');
+        if (trim($collegeCode) !== '') {
+            $college = $colleges->get(Str::lower(trim($collegeCode)));
+            if (! $college) {
+                throw new \InvalidArgumentException("Unknown college code \"{$collegeCode}\".");
+            }
+            $collegeId = $college->id;
+        }
+
+        if (! $user->can('createForCollege', [Faculty::class, $collegeId])) {
+            $collegeLabel = $collegeId === null ? 'General Education (no College)' : ($colleges->first(fn ($c) => $c->id === $collegeId)?->name ?? $collegeCode);
+            throw new \InvalidArgumentException("You don't have permission to add faculty to {$collegeLabel}.");
+        }
+
+        $workloadType = Str::lower(trim((string) ($data['workload_type'] ?? 'units')));
+        if ($workloadType !== '' && ! in_array($workloadType, ['units', 'hours'], true)) {
+            throw new \InvalidArgumentException("Invalid workload_type \"{$data['workload_type']}\" — must be units or hours.");
+        }
+        $workloadType = $workloadType ?: 'units';
+
+        $maxTeachingUnitsRaw = trim((string) ($data['max_teaching_units'] ?? ''));
+        if ($maxTeachingUnitsRaw !== '' && ! ctype_digit($maxTeachingUnitsRaw)) {
+            throw new \InvalidArgumentException("Invalid max_teaching_units \"{$data['max_teaching_units']}\" — must be a whole number.");
+        }
+        $maxTeachingUnits = $maxTeachingUnitsRaw !== '' ? (int) $maxTeachingUnitsRaw : 24;
+        if ($maxTeachingUnits > $hardCapUnits) {
+            throw new \InvalidArgumentException("max_teaching_units ({$maxTeachingUnits}) exceeds the current ceiling of {$hardCapUnits} units.");
+        }
+
+        $maxWeeklyHours = trim((string) ($data['max_weekly_hours'] ?? '')) !== '' ? (int) $data['max_weekly_hours'] : null;
+
+        // Same rule as store()/update(): only a changeMaxLoad-capable
+        // importer may raise the ceiling above the system default —
+        // everyone else has it silently pinned back, regardless of
+        // what the CSV asked for.
+        if (! $canChangeMaxLoad) {
+            $maxTeachingUnits = 24;
+            $maxWeeklyHours = null;
+            $workloadType = 'units';
+        }
+
+        return [
+            'first_name' => $firstName,
+            'middle_name' => trim((string) ($data['middle_name'] ?? '')) ?: null,
+            'last_name' => $lastName,
+            'suffix' => trim((string) ($data['suffix'] ?? '')) ?: null,
+            'employment_type' => $employmentType,
+            'college_id' => $collegeId,
+            'max_teaching_units' => $maxTeachingUnits,
+            'workload_type' => $workloadType,
+            'max_weekly_hours' => $maxWeeklyHours,
+            'status' => $status,
+            'email' => trim((string) ($data['email'] ?? '')) ?: null,
+            'contact_number' => trim((string) ($data['contact_number'] ?? '')) ?: null,
+            'remarks' => trim((string) ($data['remarks'] ?? '')) ?: null,
+        ];
+    }
+
+    /**
+     * Whether a CSV row looks like a duplicate of a Faculty member
+     * already on the roster — either an explicit faculty_id collision
+     * (handled separately by the caller before this runs) or the same
+     * First Name + Last Name + College already existing, which is the
+     * realistic near-duplicate signal for a roster that doesn't
+     * require the CSV to supply an ID at all. Returns the reason to
+     * skip with, or null if it's genuinely new. Shared by import() and
+     * preview() so they can never disagree on what counts as a
+     * duplicate.
+     */
+    private function duplicateFacultyMessage(array $data, $colleges, array $existingByName): ?string
+    {
+        $firstName = trim((string) ($data['first_name'] ?? ''));
+        $lastName = trim((string) ($data['last_name'] ?? ''));
+
+        $collegeId = null;
+        $collegeCode = trim((string) ($data['college'] ?? ''));
+        if ($collegeCode !== '') {
+            $college = $colleges->get(Str::lower($collegeCode));
+            $collegeId = $college?->id;
+        }
+
+        $key = Str::lower($firstName).'|'.Str::lower($lastName).'|'.($collegeId ?? 'none');
+
+        if ($firstName !== '' && $lastName !== '' && isset($existingByName[$key])) {
+            return 'A faculty member with this same Name and College already exists — it will be skipped.';
+        }
+
+        return null;
     }
 }

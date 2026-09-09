@@ -29,7 +29,7 @@ class StoreFacultyRequest extends FormRequest
             'middle_name' => ['nullable', 'string', 'max:100'],
             'last_name' => ['required', 'string', 'max:100'],
             'suffix' => ['nullable', 'string', 'max:20'],
-            'employment_type' => ['required', Rule::in(['Full-time', 'Part-time', 'Contractual'])],
+            'employment_type' => ['required', Rule::in(['Full-time', 'Part-time'])],
             // College is optional: leaving it blank makes this a General
             // Education Faculty member (no department), picking one makes
             // them Department Faculty. See Faculty::getFacultyCategoryAttribute().

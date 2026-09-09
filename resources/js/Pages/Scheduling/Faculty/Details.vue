@@ -34,6 +34,11 @@ const props = defineProps({
     colleges: { type: Array, default: () => [] },
     subjects: { type: Array, default: () => [] },
     hardCapUnits: { type: Number, default: 40 },
+    // Gates the "Edit Information" button — false when this faculty
+    // belongs to another College and the viewer got here via the "All
+    // Faculty" filter (Dean/OIC read-mostly scope). See
+    // FacultyPolicy::canAccess() / FacultyController::show().
+    canEdit: { type: Boolean, default: true },
     // Term-scoped data backing the Workload tab's Print / Send via Email
     // buttons — same underlying flow as Reports > Schedule by Faculty's
     // single-faculty send, see FacultyController@show.
@@ -111,7 +116,7 @@ function printFacultySchedule() {
 /* Information tab                                                     */
 /* ------------------------------------------------------------------ */
 
-const employmentTypeOptions = ['Full-time', 'Part-time', 'Contractual'];
+const employmentTypeOptions = ['Full-time', 'Part-time'];
 const statusOptions = [
     { label: 'Active', value: 'Active' },
     { label: 'Inactive', value: 'Inactive' },
@@ -196,6 +201,45 @@ const onSaveFaculty = () => {
 
 const selectedSubjectIds = ref((props.faculty.subjects ?? []).map((subject) => subject.id));
 const savingQualifications = ref(false);
+
+// Groups the (already relevance-ordered — see FacultyController::show())
+// subject list so the picker visually leads with what this faculty is
+// most likely to teach: their own College's Major subjects first, then
+// shared GenEd/Minor, then everyone else's Major subjects last.
+const subjectGroups = computed(() => {
+    const facultyCollegeId = props.faculty.college_id;
+    const own = [];
+    const shared = [];
+    const other = [];
+
+    for (const subject of props.subjects) {
+        if (subject.category === 'Major' && subject.college_id === facultyCollegeId) {
+            own.push(subject);
+        } else if (subject.category === 'General Education' || subject.category === 'Minor') {
+            shared.push(subject);
+        } else {
+            other.push(subject);
+        }
+    }
+
+    const groups = [];
+    if (own.length) {
+        groups.push({
+            label: props.faculty.college?.name
+                ? `${props.faculty.college.name} (This Faculty's College)`
+                : "This Faculty's College",
+            subjects: own,
+        });
+    }
+    if (shared.length) {
+        groups.push({ label: 'General Education / Minor', subjects: shared });
+    }
+    if (other.length) {
+        groups.push({ label: 'Other Colleges', subjects: other });
+    }
+
+    return groups;
+});
 
 watch(
     () => props.faculty.subjects,
@@ -663,7 +707,19 @@ const saveEditPlacement = async (placement, confirmedKeys = {}) => {
                             <!-- INFORMATION -->
                             <TabPanel value="information">
                                 <div class="flex justify-end mb-4">
-                                    <Button label="Edit Information" icon="pi pi-pencil" severity="secondary" outlined @click="openEdit" />
+                                    <Button
+                                        v-if="canEdit"
+                                        label="Edit Information"
+                                        icon="pi pi-pencil"
+                                        severity="secondary"
+                                        outlined
+                                        @click="openEdit"
+                                    />
+                                    <Tag
+                                        v-else
+                                        value="View only — outside your College"
+                                        severity="secondary"
+                                    />
                                 </div>
 
                                 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -717,9 +773,11 @@ const saveEditPlacement = async (placement, confirmedKeys = {}) => {
                                 <label class="text-sm font-medium text-slate-700">Assign Subjects</label>
                                 <MultiSelect
                                     v-model="selectedSubjectIds"
-                                    :options="subjects"
+                                    :options="subjectGroups"
                                     optionLabel="subject_code"
                                     optionValue="id"
+                                    optionGroupLabel="label"
+                                    optionGroupChildren="subjects"
                                     filter
                                     filterPlaceholder="Search subjects"
                                     display="chip"
@@ -727,6 +785,9 @@ const saveEditPlacement = async (placement, confirmedKeys = {}) => {
                                     class="w-full mt-1 neu-inset !border-none"
                                     :pt="{ overlay: { class: isDark ? 'dark-scope' : '' } }"
                                 >
+                                    <template #optiongroup="{ option }">
+                                        <span class="text-xs font-semibold tracking-wide text-slate-400 uppercase">{{ option.label }}</span>
+                                    </template>
                                     <template #option="{ option }">
                                         <span class="font-medium">{{ option.subject_code }}</span>
                                         <span class="text-slate-400"> — {{ option.subject_title }}</span>
@@ -994,7 +1055,7 @@ const saveEditPlacement = async (placement, confirmedKeys = {}) => {
                                                     <Button icon="pi pi-times" severity="secondary" text rounded :disabled="editSaving" @click="cancelEditPlacement" />
                                                 </div>
                                                 <Button
-                                                    v-else
+                                                    v-else-if="canEdit"
                                                     icon="pi pi-pencil"
                                                     text
                                                     rounded

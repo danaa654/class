@@ -123,6 +123,12 @@ Route::middleware('auth')->group(function () {
     Route::delete('/curriculums/{curriculum}/subjects/{curriculumItem}', [CurriculumSubjectController::class, 'destroy'])->name('curriculums.subjects.destroy');
     Route::get('/scheduling', [SchedulingController::class, 'index'])->name('scheduling');
     Route::get('/scheduling/faculty', [FacultyController::class, 'index'])->name('scheduling.faculty');
+    // Bulk Import — Faculty Master (mirrors Room Master's/Subject
+    // Library's Bulk Import). Placed above the {faculty} routes so
+    // "import" is never mistaken for a faculty identifier.
+    Route::get('/scheduling/faculty/import/template', [FacultyController::class, 'importTemplate'])->name('scheduling.faculty.import.template');
+    Route::post('/scheduling/faculty/import/preview', [FacultyController::class, 'preview'])->name('scheduling.faculty.import.preview');
+    Route::post('/scheduling/faculty/import', [FacultyController::class, 'import'])->name('scheduling.faculty.import');
     Route::post('/scheduling/faculty', [FacultyController::class, 'store'])->name('scheduling.faculty.store');
     Route::get('/scheduling/faculty/{faculty}', [FacultyController::class, 'show'])->name('scheduling.faculty.show');
     Route::put('/scheduling/faculty/{faculty}', [FacultyController::class, 'update'])->name('scheduling.faculty.update');

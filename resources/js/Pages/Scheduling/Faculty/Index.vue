@@ -29,6 +29,12 @@ const props = defineProps({
         default: () => ({ faculty_search: '', faculty_category: '' }),
     },
     colleges: { type: Array, default: () => [] },
+    // Colleges the "Department Faculty"/"All Faculty" college
+    // sub-filter should offer — see
+    // FacultyController::viewableCollegesForFilter(). Only rendered
+    // when it has more than one entry (a single-College Dean/OIC
+    // gets nothing extra to filter by).
+    filterColleges: { type: Array, default: () => [] },
     nextFacultyId: { type: String, default: '' },
 
     // System-wide teaching-load ceiling (Settings > Faculty & Workload)
@@ -37,6 +43,14 @@ const props = defineProps({
     // FacultyPolicy::changeMaxLoad()).
     hardCapUnits: { type: Number, default: 40 },
     canCreateFacultyDirectly: { type: Boolean, default: false },
+    // Gates the Bulk Import button/dialog — see
+    // FacultyController::index()'s canImportFacultyDirectly.
+    canImportFacultyDirectly: { type: Boolean, default: false },
+    // Only true for a College-scoped viewer (Dean/OIC) — see
+    // FacultyController::index(). Gates whether the "All Faculty"
+    // filter option is offered at all; Admin/Registrar/Assistant Dean
+    // already see the full roster by default so it'd be redundant.
+    isCollegeScopedViewer: { type: Boolean, default: false },
 });
 
 const toast = useToast();
@@ -61,25 +75,154 @@ watch(
 );
 
 /* ------------------------------------------------------------------ */
+/* Bulk Import — Faculty Master                                        */
+/*                                                                      */
+/* Adding a whole department's worth of Faculty one at a time through */
+/* the Add Faculty dialog doesn't scale. Backed by                     */
+/* FacultyController::import() — every row gets the exact same        */
+/* validation a manual Add Faculty would, and rows that fail are      */
+/* reported back individually rather than aborting the whole file.    */
+/* Same pattern as Scheduling/Rooms/Index.vue's Bulk Import.          */
+/* ------------------------------------------------------------------ */
+
+const importVisible = ref(false);
+const importForm = useForm({ file: null });
+const importFileName = ref('');
+
+const csrfToken = () => {
+    const match = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]*)/);
+    return match ? decodeURIComponent(match[1]) : (document.querySelector('meta[name="csrf-token"]')?.content ?? '');
+};
+
+const previewRows = ref([]);
+const previewLoading = ref(false);
+const previewError = ref('');
+const previewSummary = computed(() => ({
+    new: previewRows.value.filter((r) => r.status === 'new').length,
+    exists: previewRows.value.filter((r) => r.status === 'exists').length,
+    error: previewRows.value.filter((r) => r.status === 'error').length,
+}));
+const previewStatusMeta = {
+    new: { severity: 'success', label: 'New' },
+    exists: { severity: 'warn', label: 'Already exists' },
+    error: { severity: 'danger', label: 'Invalid' },
+};
+
+const resetImportPreview = () => {
+    previewRows.value = [];
+    previewError.value = '';
+    previewLoading.value = false;
+};
+
+const openImport = () => {
+    importForm.reset();
+    importForm.clearErrors();
+    importFileName.value = '';
+    resetImportPreview();
+    importVisible.value = true;
+};
+
+const onImportFileChange = async (event) => {
+    const file = event.target.files?.[0] ?? null;
+    importForm.file = file;
+    importFileName.value = file?.name ?? '';
+    resetImportPreview();
+
+    if (!file) return;
+
+    previewLoading.value = true;
+    try {
+        const body = new FormData();
+        body.append('file', file);
+
+        const response = await fetch(route('scheduling.faculty.import.preview'), {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'X-XSRF-TOKEN': csrfToken() },
+            body,
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            previewError.value = data?.error ?? 'Could not read this file. Please check it and try again.';
+            return;
+        }
+
+        previewRows.value = data.rows ?? [];
+    } catch (e) {
+        previewError.value = 'Could not reach the server to preview this file.';
+    } finally {
+        previewLoading.value = false;
+    }
+};
+
+const submitImport = () => {
+    if (!importForm.file) {
+        toast.add({ severity: 'warn', summary: 'No file selected', detail: 'Please choose a CSV file first.', life: 4000 });
+        return;
+    }
+
+    importForm.post(route('scheduling.faculty.import'), {
+        forceFormData: true,
+        preserveScroll: true,
+        onSuccess: () => {
+            importVisible.value = false;
+            importForm.reset();
+            importFileName.value = '';
+            resetImportPreview();
+        },
+    });
+};
+
+/* ------------------------------------------------------------------ */
 /* Search / list                                                       */
 /* ------------------------------------------------------------------ */
 
 const search = ref(props.filters.faculty_search ?? '');
 const categoryFilter = ref(props.filters.faculty_category ?? '');
+// Secondary "College" narrowing — only meaningful (and only rendered)
+// under "Department Faculty"/"All Faculty" for a viewer who can see
+// more than one College under the current scope. Reset whenever the
+// category changes away from those two, so a stale College filter
+// doesn't silently linger into "General Education Faculty" (which has
+// no college_id to filter by).
+const collegeFilter = ref(props.filters.faculty_college_id ?? null);
 const loading = ref(false);
 let searchDebounce = null;
 
 // Not a stored field — General Education Faculty is simply "no College
 // assigned". Kept as a quick filter option since it's still a useful
 // distinction, just derived rather than tracked separately.
-const facultyCategoryOptions = ['Department Faculty', 'General Education Faculty'];
+// "All Faculty" is a separate SCOPE toggle (not a category) — it lifts
+// the College restriction so a Dean/OIC can browse the institution-wide
+// roster read-mostly (see canEdit/canDelete per row below). Only
+// offered when the viewer is actually College-scoped; everyone else
+// already sees everything without it.
+const facultyCategoryOptions = computed(() => (
+    props.isCollegeScopedViewer
+        ? ['Department Faculty', 'General Education Faculty', 'All Faculty']
+        : ['Department Faculty', 'General Education Faculty']
+));
+
+// Only worth showing when there's more than one College to choose
+// from — a single-College Dean/OIC would just see their own College
+// as the only option, which filters nothing.
+const showCollegeFilter = computed(() => (
+    props.filterColleges.length > 1
+    && (categoryFilter.value === 'Department Faculty' || categoryFilter.value === 'All Faculty')
+));
 
 const reloadFaculties = (extra = {}) => {
     loading.value = true;
 
     router.get(
         route('scheduling.faculty'),
-        { faculty_search: search.value, faculty_category: categoryFilter.value, ...extra },
+        {
+            faculty_search: search.value,
+            faculty_category: categoryFilter.value,
+            faculty_college_id: showCollegeFilter.value ? collegeFilter.value : null,
+            ...extra,
+        },
         {
             preserveState: true,
             preserveScroll: true,
@@ -100,6 +243,13 @@ watch(search, () => {
 });
 
 watch(categoryFilter, () => {
+    if (!showCollegeFilter.value) {
+        collegeFilter.value = null;
+    }
+    reloadFaculties({ faculty_page: 1 });
+});
+
+watch(collegeFilter, () => {
     reloadFaculties({ faculty_page: 1 });
 });
 
@@ -115,10 +265,18 @@ const onRefresh = () => {
 /* Add / Edit Faculty                                                   */
 /* ------------------------------------------------------------------ */
 
-const employmentTypeOptions = ['Full-time', 'Part-time', 'Contractual'];
+const employmentTypeOptions = ['Full-time', 'Part-time'];
 const statusOptions = [
     { label: 'Active', value: 'Active' },
     { label: 'Inactive', value: 'Inactive' },
+];
+// Whichever workload measurement the institution uses — 'units'
+// (default, checked against Max Teaching Units) or 'hours' (checked
+// against Max Weekly Hours instead). See FacultyWorkloadService.
+// Mirrors Details.vue's Edit Information form exactly.
+const workloadTypeOptions = [
+    { label: 'Teaching Units', value: 'units' },
+    { label: 'Weekly Hours', value: 'hours' },
 ];
 
 const addFacultyVisible = ref(false);
@@ -143,6 +301,13 @@ const facultyForm = useForm({
     employment_type: null,
     college_id: null,
     max_teaching_units: 21,
+    // Kept in sync with the Details page's "Edit Information" form —
+    // this dialog previously omitted these two fields entirely, which
+    // meant saving an edit here silently reset a faculty member's
+    // Workload Measurement back to 'units' and wiped max_weekly_hours,
+    // even if it had been properly set to 'hours' via Details.vue.
+    workload_type: 'units',
+    max_weekly_hours: null,
     status: 'Active',
     email: '',
     contact_number: '',
@@ -183,6 +348,8 @@ const openEdit = (faculty) => {
     facultyForm.employment_type = faculty.employment_type;
     facultyForm.college_id = faculty.college_id;
     facultyForm.max_teaching_units = faculty.max_teaching_units;
+    facultyForm.workload_type = faculty.workload_type ?? 'units';
+    facultyForm.max_weekly_hours = faculty.max_weekly_hours ?? null;
     facultyForm.status = faculty.status;
     facultyForm.email = faculty.email ?? '';
     facultyForm.contact_number = faculty.contact_number ?? '';
@@ -383,6 +550,17 @@ const fullName = (faculty) => {
                                     class="w-full sm:w-64"
                                     :pt="{ overlay: { class: isDark ? 'dark-scope' : '' } }"
                                 />
+                                <Select
+                                    v-if="showCollegeFilter"
+                                    v-model="collegeFilter"
+                                    :options="filterColleges"
+                                    optionLabel="name"
+                                    optionValue="id"
+                                    placeholder="All Colleges"
+                                    showClear
+                                    class="w-full sm:w-56"
+                                    :pt="{ overlay: { class: isDark ? 'dark-scope' : '' } }"
+                                />
                             </div>
                         </template>
                         <template #end>
@@ -395,6 +573,14 @@ const fullName = (faculty) => {
                                     :loading="loading"
                                     @click="onRefresh"
                                     aria-label="Refresh"
+                                />
+                                <Button
+                                    v-if="canImportFacultyDirectly"
+                                    label="Import"
+                                    icon="pi pi-upload"
+                                    severity="secondary"
+                                    outlined
+                                    @click="openImport"
                                 />
                                 <Button
                                     v-if="canCreateFacultyDirectly"
@@ -464,6 +650,13 @@ const fullName = (faculty) => {
                             <template #body="{ data }">
                                 <span v-if="data.college?.name">{{ data.college.name }}</span>
                                 <Tag v-else value="General Education" severity="warning" />
+                                <Tag
+                                    v-if="!data.canEdit"
+                                    value="View only"
+                                    severity="secondary"
+                                    class="ml-2 !text-[10px]"
+                                    v-tooltip.top="'Outside your College — view only. Ask that College\'s Dean/OIC to edit.'"
+                                />
                             </template>
                         </Column>
                         <Column header="Max Teaching Units" style="width: 9rem">
@@ -529,7 +722,7 @@ const fullName = (faculty) => {
                                         title="Actions"
                                         :bullets="[
                                             '👁 View — details, teaching qualifications & workload.',
-                                            '✏️ Edit — update this faculty member\'s details.',
+                                            '✏️ Edit — update this faculty member\'s details (your own College\'s faculty only).',
                                             canCreateFacultyDirectly ? '🗑 Delete — permanently remove this faculty member.' : null,
                                         ].filter(Boolean)"
                                         width="w-72"
@@ -549,6 +742,7 @@ const fullName = (faculty) => {
                                         @click="router.visit(route('scheduling.faculty.show', data.id))"
                                     />
                                     <Button
+                                        v-if="data.canEdit"
                                         icon="pi pi-pencil"
                                         text
                                         rounded
@@ -558,7 +752,7 @@ const fullName = (faculty) => {
                                         @click="openEdit(data)"
                                     />
                                     <Button
-                                        v-if="canCreateFacultyDirectly"
+                                        v-if="canCreateFacultyDirectly && data.canDelete"
                                         icon="pi pi-trash"
                                         text
                                         rounded
@@ -752,6 +946,43 @@ const fullName = (faculty) => {
                     <p v-else class="text-xs text-slate-400">Current teaching load ceiling: {{ hardCapUnits }} units.</p>
                 </div>
 
+                <!-- Workload Measurement (kept in sync with Details.vue's Edit Information form) -->
+                <div class="flex flex-col gap-1">
+                    <label for="workload_type" class="text-sm font-medium" :class="isDark ? 'text-slate-300' : 'text-slate-700'">
+                        Workload Measurement
+                    </label>
+                    <Select
+                        id="workload_type"
+                        v-model="facultyForm.workload_type"
+                        :options="workloadTypeOptions"
+                        optionLabel="label"
+                        optionValue="value"
+                        :invalid="!!facultyForm.errors.workload_type"
+                        class="w-full"
+                        :pt="{ overlay: { class: isDark ? 'dark-scope' : '' } }"
+                    />
+                    <p class="text-xs text-slate-400">Whichever the institution uses to cap this faculty member's load.</p>
+                </div>
+
+                <div v-if="facultyForm.workload_type === 'hours'" class="flex flex-col gap-1">
+                    <label for="max_weekly_hours" class="text-sm font-medium" :class="isDark ? 'text-slate-300' : 'text-slate-700'">
+                        Maximum Weekly Hours
+                    </label>
+                    <InputNumber
+                        id="max_weekly_hours"
+                        v-model="facultyForm.max_weekly_hours"
+                        :min="0"
+                        showButtons
+                        buttonLayout="horizontal"
+                        :invalid="!!facultyForm.errors.max_weekly_hours"
+                        class="w-full"
+                        inputClass="w-full"
+                    />
+                    <small v-if="facultyForm.errors.max_weekly_hours" class="text-red-500">
+                        {{ facultyForm.errors.max_weekly_hours }}
+                    </small>
+                </div>
+
                 <!-- Status -->
                 <div class="flex flex-col gap-1">
                     <label for="status" class="text-sm font-medium" :class="isDark ? 'text-slate-300' : 'text-slate-700'">
@@ -831,6 +1062,113 @@ const fullName = (faculty) => {
                     severity="success"
                     :loading="facultyForm.processing"
                     @click="onSaveFaculty"
+                />
+            </template>
+        </Dialog>
+
+        <!-- Bulk Import Dialog -->
+        <Dialog
+            v-model:visible="importVisible"
+            modal
+            header="Import Faculty"
+            :style="{ width: '680px' }"
+            :breakpoints="{ '640px': '95vw' }"
+            :draggable="false"
+            :pt="{
+                root: { class: isDark ? '!bg-[#141D33] !border !border-white/10 !text-white !rounded-2xl !shadow-2xl dark-scope' : '!border !border-[rgba(30,41,59,0.06)] !rounded-2xl !shadow-2xl' },
+                header: { class: isDark ? '!bg-[#141D33] !border-b !border-white/10 !rounded-t-2xl' : '!rounded-t-2xl' },
+                content: { class: isDark ? '!bg-[#141D33]' : '' },
+                footer: { class: isDark ? '!bg-[#141D33] !border-t !border-white/10 !rounded-b-2xl' : '!rounded-b-2xl' },
+            }"
+        >
+            <div class="flex flex-col gap-4">
+                <p class="text-sm" :class="isDark ? 'text-slate-400' : 'text-slate-500'">
+                    Upload a CSV of faculty members to add them all at once — handy when onboarding a whole
+                    department instead of adding each faculty member one by one. Faculty ID is optional; leave it
+                    blank to auto-assign the next available ID.
+                </p>
+
+                <a
+                    :href="route('scheduling.faculty.import.template')"
+                    class="inline-flex w-fit items-center gap-2 text-sm font-medium text-blue-600 hover:underline"
+                >
+                    <i class="pi pi-download"></i>
+                    Download CSV template
+                </a>
+
+                <div>
+                    <label class="mb-1 block text-sm font-medium" :class="isDark ? 'text-slate-300' : 'text-slate-700'">CSV File</label>
+                    <input
+                        type="file"
+                        accept=".csv,text/csv"
+                        class="neu-inset w-full rounded-xl border-none p-2 text-sm"
+                        :class="isDark ? 'text-slate-200' : ''"
+                        @change="onImportFileChange"
+                    />
+                    <small v-if="importFileName" class="mt-1 block text-slate-400">Selected: {{ importFileName }}</small>
+                    <small v-if="importForm.errors.file" class="mt-1 block text-red-500">{{ importForm.errors.file }}</small>
+                </div>
+
+                <!-- Preview overview — read straight from the file the
+                     moment it's chosen, before anything is saved, so a
+                     faculty member who already exists is flagged up
+                     front instead of only surfacing as an error after
+                     Import is clicked. -->
+                <div v-if="previewLoading" class="flex items-center gap-2 text-sm" :class="isDark ? 'text-slate-400' : 'text-slate-500'">
+                    <i class="pi pi-spin pi-spinner"></i>
+                    Reading file…
+                </div>
+
+                <div v-else-if="previewError" class="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                    {{ previewError }}
+                </div>
+
+                <div v-else-if="previewRows.length" class="flex flex-col gap-2">
+                    <div class="flex flex-wrap items-center gap-2 text-xs">
+                        <Tag severity="success" :value="`${previewSummary.new} new`" />
+                        <Tag severity="warn" :value="`${previewSummary.exists} already exist`" v-if="previewSummary.exists" />
+                        <Tag severity="danger" :value="`${previewSummary.error} invalid`" v-if="previewSummary.error" />
+                        <span :class="isDark ? 'text-slate-400' : 'text-slate-500'">
+                            — faculty already on file will be skipped, not duplicated.
+                        </span>
+                    </div>
+
+                    <DataTable :value="previewRows" size="small" scrollable scrollHeight="260px" class="text-sm">
+                        <Column field="name" header="Name" style="width: 180px" />
+                        <Column header="College" style="width: 160px">
+                            <template #body="{ data }">
+                                <span v-if="data.college">{{ data.college }}</span>
+                                <Tag v-else value="General Education" severity="warning" />
+                            </template>
+                        </Column>
+                        <Column field="faculty_id" header="Faculty ID" style="width: 120px">
+                            <template #body="{ data }">
+                                <span :class="isDark ? 'text-slate-400' : 'text-slate-500'">{{ data.faculty_id || 'Auto-assigned' }}</span>
+                            </template>
+                        </Column>
+                        <Column header="Status" style="min-width: 220px">
+                            <template #body="{ data }">
+                                <div class="flex flex-col gap-0.5">
+                                    <Tag :severity="previewStatusMeta[data.status].severity" :value="previewStatusMeta[data.status].label" class="w-fit" />
+                                    <small v-if="data.message" :class="data.status === 'error' ? 'text-red-500' : (isDark ? 'text-slate-400' : 'text-slate-500')">
+                                        {{ data.message }}
+                                    </small>
+                                </div>
+                            </template>
+                        </Column>
+                    </DataTable>
+                </div>
+            </div>
+
+            <template #footer>
+                <Button label="Close" severity="secondary" outlined @click="importVisible = false" />
+                <Button
+                    label="Import"
+                    icon="pi pi-upload"
+                    severity="success"
+                    :loading="importForm.processing"
+                    :disabled="previewLoading || (previewRows.length > 0 && previewSummary.new === 0)"
+                    @click="submitImport"
                 />
             </template>
         </Dialog>

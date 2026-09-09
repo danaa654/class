@@ -147,9 +147,13 @@ class Faculty extends Model
      * Admin/Registrar/Assistant Dean: unrestricted (full roster —
      * Assistant Dean needs to find Minor/GenEd-qualified faculty
      * regardless of which College they belong to). Dean/OIC: their
-     * own College's faculty only. Anyone else: no rows.
+     * own College's faculty only, UNLESS $allColleges is true (the
+     * "All Faculty" filter option — a read-mostly institution-wide
+     * view; write access to rows outside their own College is still
+     * blocked by FacultyPolicy::canAccess(), this only affects what
+     * they can SEE). Anyone else: no rows.
      */
-    public function scopeVisibleTo($query, ?\App\Models\User $user)
+    public function scopeVisibleTo($query, ?\App\Models\User $user, bool $allColleges = false)
     {
         // Assistant Dean sees the FULL roster (like Admin/Registrar) —
         // Minor/GenEd subjects are taught by faculty who belong to any
@@ -160,7 +164,7 @@ class Faculty extends Model
         // WHICH qualifications/subjects they may manage for a given
         // faculty (Minor/GenEd only) — see FacultyPolicy::manageQualification()
         // — never which faculty rows they can see.
-        if (\App\Support\AccessScope::isUnrestricted($user) || \App\Support\AccessScope::isAssistantDean($user)) {
+        if (\App\Support\AccessScope::isUnrestricted($user) || \App\Support\AccessScope::isAssistantDean($user) || $allColleges) {
             return $query;
         }
 

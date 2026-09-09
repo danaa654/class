@@ -23,8 +23,7 @@ return new class extends Migration
             $table->string('middle_name')->nullable();
             $table->string('last_name');
             $table->string('suffix')->nullable();
-
-            $table->enum('employment_type', ['Full-time', 'Part-time', 'Contractual']);
+            $table->enum('employment_type', ['Full-time', 'Part-time']);
 
             // Department Faculty belong to a College; General Education
             // Faculty (GenEd/Minor — English, Math, Filipino, NSTP, PE,
