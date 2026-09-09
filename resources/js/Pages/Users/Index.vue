@@ -115,6 +115,7 @@ const form = useForm({
     college_id: null,
     department_ids: [],
     oversees_all_departments: false,
+    is_gened_assistant_dean: false,
     status: 'Active',
 });
 
@@ -122,11 +123,17 @@ const form = useForm({
 // OIC may cover any subset of departments — College + Department(s) needed.
 const rolesRequiringCollege = ['Dean', 'OIC'];
 const rolesRequiringDepartment = ['OIC'];
+// Dean/OIC only — lets one of them ALSO carry GenEd/Minor authority
+// across every college (on top of, not instead of, their own College
+// scope). Assistant Dean is excluded since that role already has this
+// reach by default.
+const rolesEligibleForGenedFlag = ['Dean', 'OIC'];
 
 const showCollege = computed(() => rolesRequiringCollege.includes(form.role));
 const showDepartment = computed(
     () => rolesRequiringDepartment.includes(form.role) && !form.oversees_all_departments,
 );
+const showGenedFlag = computed(() => rolesEligibleForGenedFlag.includes(form.role));
 
 // Clear department selections if the college changes so a stale
 // mismatch (departments from a different college) can't be submitted.
@@ -147,6 +154,9 @@ watch(
         if (!rolesRequiringDepartment.includes(form.role)) {
             form.department_ids = [];
             form.oversees_all_departments = false;
+        }
+        if (!showGenedFlag.value) {
+            form.is_gened_assistant_dean = false;
         }
     },
 );
@@ -209,6 +219,7 @@ const editForm = useForm({
     college_id: null,
     department_ids: [],
     oversees_all_departments: false,
+    is_gened_assistant_dean: false,
     status: 'Active',
 });
 
@@ -216,6 +227,17 @@ const editDepartmentOptions = computed(() => departmentOptionsFor(editForm.colle
 const editShowCollege = computed(() => rolesRequiringCollege.includes(editForm.role));
 const editShowDepartment = computed(
     () => rolesRequiringDepartment.includes(editForm.role) && !editForm.oversees_all_departments,
+);
+const editShowGenedFlag = computed(() => rolesEligibleForGenedFlag.includes(editForm.role));
+
+// Clear the flag if the role is edited to one no longer eligible for it.
+watch(
+    () => editForm.role,
+    () => {
+        if (!editShowGenedFlag.value) {
+            editForm.is_gened_assistant_dean = false;
+        }
+    },
 );
 
 const openEditUser = (user) => {
@@ -234,6 +256,7 @@ const openEditUser = (user) => {
     editForm.department_ids = user.departmentIds ?? [];
     editForm.oversees_all_departments =
         user.role === 'OIC' && user.department === 'All Departments';
+    editForm.is_gened_assistant_dean = user.isGenedAssistantDean ?? false;
     editForm.status = user.status;
     editUserVisible.value = true;
 };
@@ -928,6 +951,23 @@ const onUpdateAccount = () => {
                     <p class="text-xs text-slate-400 mt-1" v-if="showDepartment">
                         Select one or more departments this OIC will cover.
                     </p>
+
+                    <!-- Additive GenEd/Minor authority (Dean/OIC only) -->
+                    <div v-if="showGenedFlag" class="flex items-center gap-2 mt-4">
+                        <Checkbox
+                            id="is_gened_assistant_dean"
+                            v-model="form.is_gened_assistant_dean"
+                            binary
+                            :disabled="!form.college_id"
+                        />
+                        <label for="is_gened_assistant_dean" class="text-sm text-slate-600">
+                            Also manage GenEd/Minor subjects across all colleges
+                        </label>
+                    </div>
+                    <p class="text-xs text-slate-400 mt-1" v-if="showGenedFlag">
+                        Keeps this user's own College scope and additionally grants Assistant
+                        Dean authority over GenEd/Minor subjects institution-wide.
+                    </p>
                 </template>
 
                 <Divider class="!my-5" />
@@ -1150,6 +1190,23 @@ const onUpdateAccount = () => {
                     </div>
                     <p class="text-xs text-slate-400 mt-1" v-if="editShowDepartment">
                         Select one or more departments this OIC will cover.
+                    </p>
+
+                    <!-- Additive GenEd/Minor authority (Dean/OIC only) -->
+                    <div v-if="editShowGenedFlag" class="flex items-center gap-2 mt-4">
+                        <Checkbox
+                            id="editIsGenedAssistantDean"
+                            v-model="editForm.is_gened_assistant_dean"
+                            binary
+                            :disabled="!editForm.college_id"
+                        />
+                        <label for="editIsGenedAssistantDean" class="text-sm text-slate-600">
+                            Also manage GenEd/Minor subjects across all colleges
+                        </label>
+                    </div>
+                    <p class="text-xs text-slate-400 mt-1" v-if="editShowGenedFlag">
+                        Keeps this user's own College scope and additionally grants Assistant
+                        Dean authority over GenEd/Minor subjects institution-wide.
                     </p>
                 </template>
 

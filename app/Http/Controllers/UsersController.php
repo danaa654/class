@@ -35,6 +35,17 @@ class UsersController extends Controller
      */
     private const ROLES_REQUIRING_DEPARTMENT = ['OIC'];
 
+    /**
+     * Roles that may additionally be granted GenEd/Minor authority via
+     * the "Also manage GenEd/Minor subjects across all colleges"
+     * checkbox (is_gened_assistant_dean). Assistant Dean itself is
+     * excluded — that role is already unrestricted for shared
+     * categories, so the flag would be redundant.
+     *
+     * @var list<string>
+     */
+    private const ROLES_ELIGIBLE_FOR_GENED_FLAG = ['Dean', 'OIC'];
+
     public function __construct(
         private readonly PasswordPolicyService $policy,
         private readonly ActivityLogService $activityLog = new ActivityLogService,
@@ -86,6 +97,7 @@ class UsersController extends Controller
             'password_changed_at' => now(),
             'status' => $validated['status'],
             'college_id' => $validated['college_id'] ?? null,
+            'is_gened_assistant_dean' => $this->resolveGenedFlag($validated),
             'email_verified_at' => now(),
         ]);
 
@@ -120,6 +132,7 @@ class UsersController extends Controller
             'email' => $validated['email'],
             'status' => $validated['status'],
             'college_id' => $validated['college_id'] ?? null,
+            'is_gened_assistant_dean' => $this->resolveGenedFlag($validated),
         ]);
 
         // Password is optional on edit — only touch it if one was given.
@@ -350,6 +363,12 @@ class UsersController extends Controller
             'password' => [$user ? 'nullable' : 'required', 'string', 'min:8', 'confirmed'],
             'status' => ['required', Rule::in(['Active', 'Inactive'])],
             'oversees_all_departments' => ['boolean'],
+            // Only meaningful for Dean/OIC — see ROLES_ELIGIBLE_FOR_GENED_FLAG
+            // and resolveGenedFlag(). Validated as a plain boolean here;
+            // resolveGenedFlag() is what actually zeroes it out for
+            // ineligible roles, so a stale "true" left over from a role
+            // switch in the form can never slip through.
+            'is_gened_assistant_dean' => ['boolean'],
             'college_id' => [
                 Rule::requiredIf(in_array($request->input('role'), self::ROLES_REQUIRING_COLLEGE, true)),
                 'nullable',
@@ -367,6 +386,23 @@ class UsersController extends Controller
                 Rule::exists('departments', 'id')->where('college_id', $request->input('college_id')),
             ],
         ];
+    }
+
+    /**
+     * Whether the "Also manage GenEd/Minor subjects across all colleges"
+     * flag should actually be persisted for this submission. Only
+     * Dean/OIC are eligible (see ROLES_ELIGIBLE_FOR_GENED_FLAG) — for
+     * every other role (Administrator, Registrar, Assistant Dean) the
+     * flag is always false, regardless of what the request sent, so a
+     * leftover checked value from switching roles in the form can never
+     * be saved against an ineligible role.
+     *
+     * @param  array<string, mixed>  $validated
+     */
+    private function resolveGenedFlag(array $validated): bool
+    {
+        return in_array($validated['role'], self::ROLES_ELIGIBLE_FOR_GENED_FLAG, true)
+            && (bool) ($validated['is_gened_assistant_dean'] ?? false);
     }
 
     /**
@@ -404,6 +440,7 @@ class UsersController extends Controller
             'email' => $user->email,
             'role' => $role,
             'mustChangePassword' => $user->must_change_password,
+            'isGenedAssistantDean' => (bool) $user->is_gened_assistant_dean,
             'collegeId' => $user->college_id,
             'departmentIds' => $user->departments->pluck('id'),
             'college' => $user->college?->name,

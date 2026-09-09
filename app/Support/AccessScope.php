@@ -44,9 +44,19 @@ class AccessScope
         return (bool) $user?->hasAnyRole(self::UNRESTRICTED_ROLES);
     }
 
+    /**
+     * True for anyone with GenEd/Minor "Assistant Dean" authority — either
+     * a user whose primary role IS Assistant Dean, OR a Dean/OIC who has
+     * additionally been granted GenEd/Minor authority via the
+     * `is_gened_assistant_dean` flag (e.g. a college's Dean who is also
+     * covering the institution-wide GenEd/Minor scope). This flag is
+     * additive only — it never replaces the user's primary role/College
+     * scope, it just layers the Assistant Dean permission set on top.
+     */
     public static function isAssistantDean(?User $user): bool
     {
-        return (bool) $user?->hasRole(self::ASSISTANT_DEAN_ROLE);
+        return (bool) $user?->hasRole(self::ASSISTANT_DEAN_ROLE)
+            || (bool) $user?->is_gened_assistant_dean;
     }
 
     public static function isCollegeScoped(?User $user): bool
@@ -109,8 +119,15 @@ class AccessScope
 
         $isShared = self::isSharedCategory($category);
 
-        if (self::isAssistantDean($user)) {
-            return $isShared;
+        // A dual-role user (Dean/OIC who has ALSO been granted GenEd/Minor
+        // authority via is_gened_assistant_dean) gets the Assistant Dean's
+        // institution-wide reach for shared categories, but must still
+        // fall through to their own College scope for non-shared (Major)
+        // categories — an "isAssistantDean() -> return $isShared" short
+        // circuit would otherwise wrongly block them from their own
+        // College's Major resources.
+        if ($isShared && self::isAssistantDean($user)) {
+            return true;
         }
 
         if (self::isCollegeScoped($user)) {
@@ -123,7 +140,9 @@ class AccessScope
             return ! $isShared && self::canAccessCollege($user, $ownerCollegeId);
         }
 
-        return false;
+        // Pure Assistant Dean (no College scope at all): only shared
+        // categories are theirs, which the branch above already covers.
+        return self::isAssistantDean($user) && $isShared;
     }
 
     public static function isSharedCategory(?string $category): bool
@@ -144,7 +163,13 @@ class AccessScope
     /**
      * The list of College ids a user's queries should be restricted
      * to, or null to mean "no restriction" (Admin/Registrar/Assistant
-     * Dean-for-shared-resources). Dean/OIC get a single-id array (or
+     * Dean-for-shared-resources). A dual-role user (Dean/OIC also flagged
+     * is_gened_assistant_dean) is treated as College-scoped HERE — this
+     * helper isn't category-aware, so it defaults to the safer/narrower
+     * scope. Callers touching GenEd/Minor resources should use
+     * canManageByCategory()/canModifySharedDefinition() instead, which
+     * correctly widen scope for shared categories only. Dean/OIC get a
+     * single-id array (or
      * an impossible id if they have no College assigned, so their
      * queries return zero rows rather than leaking data).
      *

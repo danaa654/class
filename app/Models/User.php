@@ -34,6 +34,7 @@ class User extends Authenticatable
         'status',
         'college_id',
         'department_id',
+        'is_gened_assistant_dean',
     ];
 
     /**
@@ -140,6 +141,12 @@ class User extends Authenticatable
             'password' => 'hashed',
             'password_changed_at' => 'datetime',
             'must_change_password' => 'boolean',
+            // Additive GenEd/Minor authority for a Dean/OIC who is ALSO
+            // acting as Assistant Dean (e.g. a college's Dean covering
+            // GenEd/Minor subjects institution-wide). Never set for a
+            // user whose primary role already IS Assistant Dean — see
+            // App\Support\AccessScope::isAssistantDean().
+            'is_gened_assistant_dean' => 'boolean',
         ];
     }
 }
