@@ -122,6 +122,35 @@ class AcademicTerm extends Model
     }
 
     /**
+     * Every currently-Active Major (whose Department and College are
+     * also both Active — a discontinued/no-longer-offered College or
+     * Department is deliberately excluded, see the caller for why)
+     * that has NO Section at all under this term's School Year +
+     * Semester. Purely informational — used to warn an Admin/
+     * Registrar ending a semester that some offering was seemingly
+     * skipped, not to block anything by itself (a college/major that
+     * genuinely isn't offered that term is a normal, valid state).
+     *
+     * @return array<int, array{college: ?string, major: string}>
+     */
+    public function missingOfferings(): array
+    {
+        return Major::query()
+            ->where('status', 'Active')
+            ->whereHas('department', fn ($query) => $query->where('status', 'Active')
+                ->whereHas('college', fn ($college) => $college->where('status', 'Active')))
+            ->with('department.college')
+            ->get()
+            ->reject(fn (Major $major) => $this->matchingSectionsQuery()->where('major_id', $major->id)->exists())
+            ->map(fn (Major $major) => [
+                'college' => $major->college()?->name,
+                'major' => $major->name,
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
      * Every Section belonging to this Academic Term's School Year +
      * Semester, matched via sectionSemesterValue() rather than a raw
      * string compare. Falls back to "every Section" (rather than

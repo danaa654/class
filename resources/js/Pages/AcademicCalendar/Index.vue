@@ -54,6 +54,29 @@ const dayLabels = {
     Sun: 'Sunday',
 };
 
+// Shows the actual blocking Section codes in a real, click-triggered
+// dialog rather than a native hover tooltip — a hover-only title
+// attribute is invisible in a screenshot, which is how this app is
+// mostly being checked/reported on during development, so it doesn't
+// actually help track down which sections are open. Codes come
+// straight from academicTerm.unfinalized_section_codes (capped
+// server-side at 20; see AcademicTermController::index()).
+const showUnfinalizedList = (academicTerm) => {
+    const codes = academicTerm.unfinalized_section_codes ?? [];
+    const remaining = academicTerm.unfinalized_sections_count - codes.length;
+    const listHtml = codes.map((code) => `<li>${code}</li>`).join('');
+
+    Swal.fire({
+        title: `${academicTerm.unfinalized_sections_count} section${academicTerm.unfinalized_sections_count === 1 ? '' : 's'} still open`,
+        html: `<p style="text-align:left;">These sections under <strong>${academicTerm.school_year?.name ?? ''} - ${academicTerm.semester?.name ?? ''}</strong> aren't finalized yet — End Semester is hidden until they are:</p>
+               <ul style="text-align:left; margin-top:8px; max-height:220px; overflow-y:auto;">${listHtml}</ul>
+               ${remaining > 0 ? `<p style="text-align:left; margin-top:8px;">+${remaining} more not shown.</p>` : ''}`,
+        icon: 'warning',
+        confirmButtonColor: '#D97706',
+        confirmButtonText: 'Got it',
+    });
+};
+
 // 12-hour display helper for the read-only Lunch Break/Time Interval
 // blocks and for building the Class Start/End Time dropdown labels.
 const formatTimeLabel = (time) => {
@@ -102,10 +125,15 @@ watch(
     },
 );
 
+// Status dropdown deliberately offers only Active/Inactive — Archived
+// is reachable exclusively via the End Semester action, and reversed
+// exclusively via the dedicated Reopen action below (each with its
+// own gate/reason/log); see AcademicTermController::update()'s guard,
+// which independently blocks a direct request from smuggling
+// "Archived" through this form either way.
 const statusOptions = [
     { label: 'Active', value: 'Active' },
     { label: 'Inactive', value: 'Inactive' },
-    { label: 'Archived', value: 'Archived' },
 ];
 
 // Semester dropdown — a fixed list, not a lookup table. There's no
@@ -316,19 +344,80 @@ const onRestoreAcademicTerm = (academicTerm) => {
     });
 };
 
-// Archive ("End Semester") is only offered for Inactive terms — an
-// Active term must be switched to Inactive first (or superseded by
-// making another term Active, which auto-flips it per AcademicTerm::
-// booted()), and an already-Archived term has nothing left to do.
+// Archive ("End Semester") is only offered for Inactive terms that
+// have at least one Section (data.has_sections) AND have every one
+// of those Sections finalized (data.all_sections_finalized) — a term
+// must be switched to Inactive first (or superseded by making another
+// term Active, which auto-flips it per AcademicTerm::booted()), and an
+// already-Archived term has nothing left to do. The button itself is
+// hidden (not just disabled) until both flags are true, computed
+// server-side in AcademicTermController::index() — so admins see it
+// "unlock" only once the term is actually ready. A term with zero
+// Sections shows the "🔒 No sections yet" hint above instead.
 //
-// END SEMESTER GATE: the controller independently blocks this unless
-// every Section under the term is finalized (or the term has none at
-// all) — see AcademicTermController::archive(). That's the real
+// END SEMESTER GATE: the controller independently re-checks this on
+// submit — see AcademicTermController::archive(). That's the real
 // enforcement; the confirmation copy here is just a heads-up. The
 // blocking-section list, when the archive is rejected, comes back as
 // errors.status and is shown in a follow-up alert rather than a
 // generic toast, so the Admin/Registrar sees exactly which sections
 // to go finalize first.
+//
+// DOUBLE CONFIRMATION FOR MISSING OFFERINGS: academicTerm.missing_
+// offerings (computed server-side in AcademicTermController::index())
+// lists every currently-Active college/major with zero sections at
+// all this term. When that list isn't empty, a second prompt collects
+// a typed reason before submitting — mirrors the server-side gate in
+// archive(), which independently re-checks and rejects with
+// errors.missing_offerings if a reason wasn't sent (e.g. the page's
+// cached list went stale). Ordinary case (nothing missing) skips
+// straight to submitting, same as before this feature existed.
+const submitArchive = (academicTerm, reason = '') => {
+    router.put(route('academic-terms.archive', academicTerm.id), { reason }, {
+        preserveScroll: true,
+        preserveState: true,
+        onError: (errors) => {
+            if (errors.missing_offerings) {
+                promptMissingOfferingsReason(academicTerm, errors.missing_offerings);
+                return;
+            }
+
+            Swal.fire({
+                title: "Can't end this semester yet",
+                text: errors.status ?? 'Please try again.',
+                icon: 'error',
+                confirmButtonColor: '#D97706',
+                confirmButtonText: 'Got it',
+            });
+        },
+    });
+};
+
+const promptMissingOfferingsReason = (academicTerm, warningText) => {
+    const listHtml = (academicTerm.missing_offerings ?? [])
+        .map((offering) => `<li>${offering.college ? `${offering.college} — ` : ''}${offering.major}</li>`)
+        .join('');
+
+    Swal.fire({
+        title: 'Some offerings have no sections',
+        html: `<p style="text-align:left;">${warningText}</p>
+               ${listHtml ? `<ul style="text-align:left; margin-top:8px;">${listHtml}</ul>` : ''}
+               <p style="text-align:left; margin-top:12px;">If this is intentional (e.g. that college/major genuinely isn't offered this term), type a short reason to proceed.</p>`,
+        icon: 'warning',
+        input: 'text',
+        inputPlaceholder: 'e.g. COC has no offerings this term, confirmed with the Registrar',
+        inputValidator: (value) => (!value || !value.trim() ? 'A reason is required to proceed.' : undefined),
+        showCancelButton: true,
+        confirmButtonColor: '#D97706',
+        cancelButtonColor: '#64748B',
+        confirmButtonText: 'Proceed anyway',
+    }).then((result) => {
+        if (result.isConfirmed) {
+            submitArchive(academicTerm, result.value.trim());
+        }
+    });
+};
+
 const onArchiveAcademicTerm = (academicTerm) => {
     Swal.fire({
         title: 'End this semester?',
@@ -340,13 +429,43 @@ const onArchiveAcademicTerm = (academicTerm) => {
         confirmButtonText: 'Yes, end semester',
     }).then((result) => {
         if (result.isConfirmed) {
-            router.put(route('academic-terms.archive', academicTerm.id), {}, {
+            if ((academicTerm.missing_offerings ?? []).length > 0) {
+                promptMissingOfferingsReason(academicTerm, 'These active colleges/majors have no sections at all this term:');
+                return;
+            }
+
+            submitArchive(academicTerm);
+        }
+    });
+};
+
+// Reopen ("Undo End Semester") — the only way back out of Archived
+// (see AcademicTermController::update()'s guard, which blocks the
+// Status dropdown from doing this directly). Always requires a typed
+// reason, mirroring Finalize/Unlock's own bar for reversing a
+// "done" state, and always resolves back to Inactive — see
+// AcademicTermController::reopen()'s docblock for why never Active.
+const onReopenAcademicTerm = (academicTerm) => {
+    Swal.fire({
+        title: 'Reopen this semester?',
+        html: `<strong>${academicTerm.school_year?.name ?? ''} - ${academicTerm.semester?.name ?? ''}</strong> will go back to Inactive so it can be edited again. Type a short reason for reopening it.`,
+        icon: 'warning',
+        input: 'text',
+        inputPlaceholder: 'e.g. Need to correct a room assignment for BSIT-1A',
+        inputValidator: (value) => (!value || !value.trim() ? 'A reason is required to reopen this term.' : undefined),
+        showCancelButton: true,
+        confirmButtonColor: '#D97706',
+        cancelButtonColor: '#64748B',
+        confirmButtonText: 'Yes, reopen it',
+    }).then((result) => {
+        if (result.isConfirmed) {
+            router.put(route('academic-terms.reopen', academicTerm.id), { reason: result.value.trim() }, {
                 preserveScroll: true,
                 preserveState: true,
                 onError: (errors) => {
                     Swal.fire({
-                        title: "Can't end this semester yet",
-                        text: errors.status ?? 'Please try again.',
+                        title: "Can't reopen this term",
+                        text: errors.status ?? errors.reason ?? 'Please try again.',
                         icon: 'error',
                         confirmButtonColor: '#D97706',
                         confirmButtonText: 'Got it',
@@ -395,7 +514,8 @@ const helpPopover = ref(null);
                             'Only one academic term can be Active at a time.',
                             'Active terms are used for day-to-day scheduling.',
                             'Inactive terms are historical/closed terms.',
-                            'A term can only be archived (End Semester) after all its sections are finalized.',
+                            'A term can only be archived (End Semester) once it has at least one section and all of its sections are finalized.',
+                            'An Archived term can be brought back to Inactive via Reopen, with a required reason.',
                             'Admin/Registrar can unlock a finalized section when corrections are required.',
                         ]"
                     />
@@ -415,12 +535,19 @@ const helpPopover = ref(null);
                     </p>
                     <p>
                         <strong>End Semester</strong> (the archive action, shown only on Inactive terms) marks a term
-                        as historical. It's blocked unless every section under that term has been finalized first —
-                        if any aren't, you'll see exactly which sections still need finalizing.
+                        as historical. It's blocked unless the term has at least one section and every section under
+                        it has been finalized — a term with no sections yet shows a "No sections yet" notice instead
+                        of the button, and a term with unfinalized sections shows exactly which ones still need
+                        finalizing.
                     </p>
                     <p>
                         An Admin/Registrar can still unlock and correct a section even after its term has been
                         archived — archiving doesn't take that away.
+                    </p>
+                    <p>
+                        <strong>Reopen</strong> (shown only on Archived terms) undoes End Semester, putting the term
+                        back to Inactive — never Active. It requires a typed reason, which is recorded to the
+                        Activity Log, same as Unlock.
                     </p>
                 </div>
             </Popover>
@@ -508,6 +635,23 @@ const helpPopover = ref(null);
                                     :value="data.status"
                                     :severity="data.status === 'Active' ? 'success' : (data.status === 'Archived' ? 'warn' : 'secondary')"
                                 />
+                                <button
+                                    v-if="!data.deleted_at && data.status === 'Inactive' && !data.all_sections_finalized"
+                                    type="button"
+                                    class="text-xs mt-1 underline decoration-dotted"
+                                    :class="isDark ? 'text-amber-400' : 'text-amber-600'"
+                                    @click="showUnfinalizedList(data)"
+                                >
+                                    🔒 {{ data.unfinalized_sections_count }} section{{ data.unfinalized_sections_count === 1 ? '' : 's' }} still open
+                                </button>
+                                <span
+                                    v-else-if="!data.deleted_at && data.status === 'Inactive' && !data.has_sections"
+                                    class="block text-xs mt-1"
+                                    :class="isDark ? 'text-amber-400' : 'text-amber-600'"
+                                    title="Add at least one section under this term before End Semester becomes available."
+                                >
+                                    🔒 No sections yet
+                                </span>
                             </template>
                         </Column>
                         <Column header="Scheduling Window" style="width: 16rem">
@@ -539,15 +683,26 @@ const helpPopover = ref(null);
                                             @click="openEditAcademicTerm(data)"
                                         />
                                         <Button
-                                            v-if="data.status === 'Inactive'"
+                                            v-if="data.status === 'Inactive' && data.all_sections_finalized && data.has_sections"
                                             icon="pi pi-inbox"
                                             text
                                             rounded
                                             severity="warn"
                                             size="small"
                                             aria-label="End Semester"
-                                            title="End Semester — archive this term (requires every section to be finalized)"
+                                            title="End Semester — archive this term"
                                             @click="onArchiveAcademicTerm(data)"
+                                        />
+                                        <Button
+                                            v-if="data.status === 'Archived'"
+                                            icon="pi pi-history"
+                                            text
+                                            rounded
+                                            severity="warn"
+                                            size="small"
+                                            aria-label="Reopen"
+                                            title="Reopen — undo End Semester, back to Inactive"
+                                            @click="onReopenAcademicTerm(data)"
                                         />
                                         <Button
                                             icon="pi pi-trash"
@@ -653,22 +808,36 @@ const helpPopover = ref(null);
 
                 <!-- Status -->
                 <div class="grid grid-cols-1 gap-5 mt-5">
-                    <FloatLabel variant="on">
-                        <Select
-                            id="academicTermStatus"
-                            v-model="academicTermForm.status"
-                            :options="statusOptions"
-                            optionLabel="label"
-                            optionValue="value"
-                            class="w-full"
-                            :invalid="!!academicTermForm.errors.status"
-                        />
-                        <label for="academicTermStatus">Status *</label>
-                    </FloatLabel>
-                    <small v-if="academicTermForm.errors.status" class="text-red-500 -mt-4">{{ academicTermForm.errors.status }}</small>
-                    <p v-if="academicTermForm.status === 'Active'" class="text-xs -mt-4" :class="isDark ? 'text-slate-500' : 'text-slate-400'">
-                        Setting this Academic Term Active will automatically set every other Academic Term to Inactive.
-                    </p>
+                    <template v-if="academicTermForm.status === 'Archived'">
+                        <div class="rounded-xl border px-4 py-3" :class="isDark ? 'border-white/10 bg-white/[0.04]' : 'border-slate-200 bg-slate-50'">
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm font-medium" :class="isDark ? 'text-slate-200' : 'text-slate-700'">Status</span>
+                                <Tag value="Archived" severity="warn" />
+                            </div>
+                            <p class="text-xs mt-2" :class="isDark ? 'text-slate-400' : 'text-slate-500'">
+                                This term has already been ended. Close this dialog and use the Reopen action on the list
+                                to bring it back to Inactive — status can't be changed from here while it's Archived.
+                            </p>
+                        </div>
+                    </template>
+                    <template v-else>
+                        <FloatLabel variant="on">
+                            <Select
+                                id="academicTermStatus"
+                                v-model="academicTermForm.status"
+                                :options="statusOptions"
+                                optionLabel="label"
+                                optionValue="value"
+                                class="w-full"
+                                :invalid="!!academicTermForm.errors.status"
+                            />
+                            <label for="academicTermStatus">Status *</label>
+                        </FloatLabel>
+                        <small v-if="academicTermForm.errors.status" class="text-red-500 -mt-4">{{ academicTermForm.errors.status }}</small>
+                        <p v-if="academicTermForm.status === 'Active'" class="text-xs -mt-4" :class="isDark ? 'text-slate-500' : 'text-slate-400'">
+                            Setting this Academic Term Active will automatically set every other Academic Term to Inactive.
+                        </p>
+                    </template>
                 </div>
 
                 <!-- Remarks -->

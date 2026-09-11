@@ -94,11 +94,7 @@ class SectionPolicy
      *
      * Who may lock a Section's schedule so it can no longer be
      * edited: Registrar/Admin (unrestricted), plus a Dean/OIC for
-     * Sections within their own College/Department scope. This is
-     * the asymmetric half of the lock — see unlockSchedule() below,
-     * which deliberately stays Registrar/Admin-only so a Dean/OIC
-     * can't finalize, get pushback, and quietly reopen it themselves
-     * without an audit trail.
+     * Sections within their own College/Department scope.
      */
     public function finalize(User $user, Section $section): bool
     {
@@ -107,17 +103,19 @@ class SectionPolicy
     }
 
     /**
-     * Who may reverse a finalization: Registrar/Admin ONLY — never
-     * the Dean/OIC/Assistant Dean, even for a Section within their
-     * own scope, and even though Dean/OIC can now finalize() it
-     * themselves (see above). This asymmetry is deliberate and is
-     * the whole point of the feature (spec: finalization is a
-     * commitment device, not a togglable checkbox) — see the design
-     * notes shared alongside this policy.
+     * Who may reverse a finalization: Registrar/Admin (unrestricted),
+     * plus a Dean/OIC for Sections within their own College/
+     * Department scope — the same scope rule as finalize() above, so
+     * a Dean/OIC has symmetric authority to lock and unlock schedules
+     * for their own college only. Assistant Dean is deliberately
+     * excluded (canAccess()/manageScheduling() give them broader view
+     * access, but finalize/unlock stay Dean/OIC + Registrar/Admin
+     * only, per adviser guidance).
      */
     public function unlockSchedule(User $user, Section $section): bool
     {
-        return AccessScope::isUnrestricted($user);
+        return AccessScope::isUnrestricted($user)
+            || (AccessScope::isCollegeScoped($user) && AccessScope::canAccessCollege($user, $section->major?->college()?->id));
     }
 
     private function canAccess(User $user, Section $section): bool

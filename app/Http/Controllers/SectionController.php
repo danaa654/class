@@ -773,11 +773,12 @@ class SectionController extends Controller
     /**
      * SECTION-LEVEL SCHEDULE FINALIZATION.
      *
-     * Reverses finalize() — Registrar/Admin only (SectionPolicy::
-     * unlockSchedule()), deliberately not the Dean/OIC who finalized
-     * it. Requires a short reason so there's an audit trail of why a
-     * "done" schedule was reopened; this becomes part of the
-     * flash-message success text today, and is the natural place to
+     * Reverses finalize() — Registrar/Admin, plus a Dean/OIC for
+     * Sections within their own College/Department scope
+     * (SectionPolicy::unlockSchedule()), same scope rule as
+     * finalize() itself. Requires a short reason so there's an audit
+     * trail of why a "done" schedule was reopened; this becomes part
+     * of the flash-message success text today, and is the natural place to
      * hook in an activity log entry later using the same pattern as
      * term_college_finalizations.
      */

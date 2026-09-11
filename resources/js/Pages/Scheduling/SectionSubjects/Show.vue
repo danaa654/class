@@ -3495,7 +3495,7 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                             <li>"Auto Generate Schedule" proposes Faculty, Room, and Time for every unscheduled subject — review before saving.</li>
                             <li>"Save Schedule" persists everything at once; the server validates room, faculty, section, and time conflicts before committing.</li>
                             <li>⚡ Auto tags mark rows assigned by the recommendation engine, not yet saved.</li>
-                            <li>🔒 Finalized sections are locked from editing — only Admin/Registrar can unlock them.</li>
+                            <li>🔒 Finalized sections are locked from editing — Admin/Registrar, or a Dean/OIC over their own College, can unlock them.</li>
                         </ul>
                     </div>
                 </Popover>
@@ -3647,7 +3647,7 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
             >
                 <i class="pi pi-lock"></i>
                 <span class="font-medium">🔒 Finalized</span>
-                <span>— this section's schedule is locked. Only an Admin/Registrar can unlock it before it can be edited again.</span>
+                <span>— this section's schedule is locked. An Admin/Registrar, or a Dean/OIC over their own College, can unlock it before it can be edited again.</span>
             </div>
 
             <!-- Subjects / Room Grid tab switcher -->
@@ -3865,7 +3865,7 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                                     value="🔒 Finalized"
                                                     severity="warn"
                                                     class="!text-[0.65rem]"
-                                                    title="This section's schedule is finalized and locked. Only an Admin/Registrar can unlock it."
+                                                    title="This section's schedule is finalized and locked. An Admin/Registrar, or a Dean/OIC over their own College, can unlock it."
                                                 />
                                                 <Tag
                                                     v-if="data.is_auto_generated"

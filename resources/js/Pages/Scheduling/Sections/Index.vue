@@ -1235,7 +1235,7 @@ const onDeleteSection = (section) => {
 const onFinalizeSection = (section) => {
     Swal.fire({
         title: 'Finalize this schedule?',
-        html: `<strong>${section.section_name}</strong>'s schedule will be locked — Room Grid, manual edits, and Auto Generate will all be blocked until an Admin/Registrar unlocks it again.`,
+        html: `<strong>${section.section_name}</strong>'s schedule will be locked — Room Grid, manual edits, and Auto Generate will all be blocked until it's unlocked again.`,
         icon: 'warning',
         showCancelButton: true,
         confirmButtonColor: '#2563EB',
@@ -1322,7 +1322,7 @@ const onUnlockSection = (section) => {
                         :bullets="[
                             'Irregular sections don\'t follow the standard curriculum flow and may need subjects merged in from a regular section.',
                             'Scheduling status tracks how many of a section\'s subjects have been assigned a room, faculty, and time.',
-                            '🔒 A finalized section\'s schedule is locked from normal editing — only Admin/Registrar can unlock it.',
+                            '🔒 A finalized section\'s schedule is locked from normal editing — Admin/Registrar, or a Dean/OIC over their own College, can unlock it.',
                             'Click a row to open that section\'s subjects and manage its schedule.',
                         ]"
                     />
@@ -1546,7 +1546,7 @@ const onUnlockSection = (section) => {
                                         :bullets="[
                                             'Active — currently used for scheduling.',
                                             'Inactive — kept for historical records.',
-                                            '🔒 Lock icon — this section is finalized; Admin/Registrar can unlock it to make corrections.',
+                                            '🔒 Lock icon — this section is finalized; Admin/Registrar, or a Dean/OIC over their own College, can unlock it to make corrections.',
                                         ]"
                                         width="w-64"
                                     />

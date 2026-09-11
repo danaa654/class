@@ -72,19 +72,19 @@ class HandleInertiaRequests extends Middleware
                     'manageRooms' => $user->can('create', \App\Models\Room::class),
                     'manageSections' => $user->can('create', \App\Models\Section::class),
                     // Section-level schedule finalization/unlock —
-                    // now asymmetric (SectionPolicy::finalize()/
-                    // unlockSchedule()). Finalize is open to
+                    // symmetric (SectionPolicy::finalize()/
+                    // unlockSchedule()). Both are open to
                     // Registrar/Admin AND a Dean/OIC over their own
                     // College/Department scope (the Sections index is
                     // already scoped per-request, so a page-wide flag
-                    // is safe here); Unlock stays Registrar/Admin
-                    // only, deliberately, so a Dean/OIC can't finalize
-                    // and then quietly reopen it themselves. Gates the
-                    // Finalize/Unlock buttons in Sections/Index.vue;
-                    // the real enforcement is still the Policy + Gate
-                    // on every request, this is UI-visibility only.
+                    // is safe here) — a Dean/OIC can finalize and
+                    // later unlock their own College's Sections, per
+                    // adviser guidance. Gates the Finalize/Unlock
+                    // buttons in Sections/Index.vue; the real
+                    // enforcement is still the Policy + Gate on every
+                    // request, this is UI-visibility only.
                     'finalizeSchedule' => \App\Support\AccessScope::isUnrestricted($user) || \App\Support\AccessScope::isCollegeScoped($user),
-                    'unlockSchedule' => \App\Support\AccessScope::isUnrestricted($user),
+                    'unlockSchedule' => \App\Support\AccessScope::isUnrestricted($user) || \App\Support\AccessScope::isCollegeScoped($user),
                 ] : [],
                 // The College a Dean/OIC is scoped to (null for
                 // unrestricted/Assistant Dean roles). Lets the

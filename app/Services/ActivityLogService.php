@@ -49,6 +49,22 @@ class ActivityLogService
 
     public const SECTION_UNLOCKED = 'SECTION_UNLOCKED';
 
+    // A semester was ended ("End Semester"/archive) while at least one
+    // currently-Active college/major had zero sections for that term —
+    // see AcademicTermController::archive(). Only ever recorded in
+    // that "something looks skipped" case, carrying the typed reason
+    // and which offerings were flagged; the ordinary/expected archive
+    // (nothing missing) isn't logged here at all.
+    public const TERM_ARCHIVED = 'TERM_ARCHIVED';
+
+    // The reverse of TERM_ARCHIVED — an Admin/Registrar reopened an
+    // ended semester (back to Inactive) via the dedicated Reopen
+    // action — see AcademicTermController::reopen(). Always recorded,
+    // unlike TERM_ARCHIVED which only logs the "something looks
+    // skipped" case — undoing an ended semester is noteworthy on its
+    // own regardless of why.
+    public const TERM_REOPENED = 'TERM_REOPENED';
+
     public const SCHEDULE_UPDATED = 'SCHEDULE_UPDATED';
 
     public const SUBJECT_ADDED_TO_SECTION = 'SUBJECT_ADDED_TO_SECTION';
@@ -91,6 +107,8 @@ class ActivityLogService
             self::SECTION_DELETED,
             self::SECTION_FINALIZED,
             self::SECTION_UNLOCKED,
+            self::TERM_ARCHIVED,
+            self::TERM_REOPENED,
             self::SCHEDULE_UPDATED,
             self::SUBJECT_ADDED_TO_SECTION,
             self::SUBJECT_REMOVED_FROM_SECTION,

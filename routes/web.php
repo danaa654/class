@@ -77,6 +77,7 @@ Route::middleware('auth')->group(function () {
     Route::delete('/academic-terms/{academicTerm}', [AcademicTermController::class, 'destroy'])->name('academic-terms.destroy');
     Route::put('/academic-terms/{academicTerm}/restore', [AcademicTermController::class, 'restore'])->name('academic-terms.restore');
     Route::put('/academic-terms/{academicTerm}/archive', [AcademicTermController::class, 'archive'])->name('academic-terms.archive');
+    Route::put('/academic-terms/{academicTerm}/reopen', [AcademicTermController::class, 'reopen'])->name('academic-terms.reopen');
     // Per-user "Viewing Academic Term" switch — Admin/Registrar only
     // (enforced again inside the controller). Changes what THIS user
     // sees (Dashboard/Reports/Settings/Sections default) without
