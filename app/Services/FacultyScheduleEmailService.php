@@ -21,9 +21,16 @@ class FacultyScheduleEmailService
 {
     /**
      * A schedule is only "finalized" (sendable) once every one of the
-     * faculty's assigned classes for the term has faculty/room/day/time
-     * all set — matches the "fully scheduled" definition Block Schedule
-     * already reports against.
+     * faculty's assigned classes for the term has faculty/day/time all
+     * set, AND a Room too — but only for rows that actually need one.
+     * An Online split row (SectionSubject::requiresRoom() === false)
+     * never gets a Room by design, so requiring one here would leave
+     * ANY faculty teaching a Face-to-Face/Online split subject stuck
+     * on "Not Finalized" forever, even once every row shows
+     * "Scheduled" on the Workload tab and the Section itself reads
+     * "Fully Scheduled" — matches the exact same Room-only-if-required
+     * rule Section::withSubjectProgressCounts() already uses for that
+     * "Fully Scheduled" count, so this can never disagree with it.
      */
     public function isFinalized(Faculty $faculty, AcademicTerm $term): bool
     {
@@ -34,10 +41,10 @@ class FacultyScheduleEmailService
         }
 
         return $rows->every(fn (SectionSubject $ss) => $ss->faculty_id
-            && $ss->room_id
             && $ss->days
             && $ss->start_time
-            && $ss->end_time);
+            && $ss->end_time
+            && ($ss->room_id || ! $ss->requiresRoom()));
     }
 
     /**
@@ -64,20 +71,45 @@ class FacultyScheduleEmailService
 
     public function buildSnapshot(Collection $rows): array
     {
-        return $rows->map(fn (SectionSubject $ss) => [
-            // Subject uses subject_code/subject_title (not code/title —
-            // see Subject::$fillable), and Room uses room_name (not
-            // name — see Room::$fillable). Using the wrong attribute
-            // names here silently returned null, which is why Subject
-            // Title and Room came back blank on the PDF/email.
-            'subject_code' => $ss->subject?->subject_code ?? $ss->edp_code,
-            'subject_title' => $ss->subject?->subject_title,
-            'section' => $ss->section?->section_code ?? $ss->section?->section_name,
-            'room' => $ss->room?->room_name,
-            'days' => $ss->days,
-            'start_time' => $ss->start_time,
-            'end_time' => $ss->end_time,
-        ])->values()->all();
+        // SPLIT-DELIVERY / MULTI-SESSION SCHEDULING — same grouping rule
+        // ReportsService::scheduleByFaculty() and the Workload tab's
+        // assignedPlacements() both apply: every SectionSubject row
+        // sharing the same Section+Subject (a Face-to-Face/Online split,
+        // for example) is the SAME assigned class with more than one
+        // Schedule line, never a second class under a second EDP Code.
+        return $rows
+            ->groupBy(fn (SectionSubject $ss) => $ss->section_id.'-'.$ss->subject_id)
+            ->map(function ($group) {
+                $primary = $group->first(fn (SectionSubject $ss) => $ss->delivery_mode !== 'online') ?? $group->first();
+
+                $schedules = $group
+                    ->sortBy(fn (SectionSubject $ss) => $ss->delivery_mode === 'online' ? 1 : 0)
+                    ->map(fn (SectionSubject $ss) => [
+                        'room' => $ss->delivery_mode === 'online' ? 'Online' : $ss->room?->room_name,
+                        'days' => $ss->days,
+                        'start_time' => $ss->start_time,
+                        'end_time' => $ss->end_time,
+                    ])
+                    ->values();
+
+                return [
+                    'edp_code' => $primary->edp_code,
+                    // Subject uses subject_code/subject_title (not code/title —
+                    // see Subject::$fillable), and Room uses room_name (not
+                    // name — see Room::$fillable). Using the wrong attribute
+                    // names here silently returned null, which is why Subject
+                    // Title and Room came back blank on the PDF/email.
+                    'subject_code' => $primary->subject?->subject_code ?? $primary->edp_code,
+                    'subject_title' => $primary->subject?->subject_title,
+                    'section' => $primary->section?->section_code ?? $primary->section?->section_name,
+                    'units' => $primary->subject?->units,
+                    // Every Schedule/Room line for this one EDP Code —
+                    // the PDF prints all of them under the same row.
+                    'schedules' => $schedules->all(),
+                ];
+            })
+            ->values()
+            ->all();
     }
 
     /**

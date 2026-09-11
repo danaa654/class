@@ -89,6 +89,27 @@
             background: #f8fafc;
         }
 
+        /* ---- Subject cell: code + title stacked, same as the Faculty
+           Workload tab's Assigned Subjects table ---- */
+        .subject-code {
+            font-weight: 700;
+            color: #1e293b;
+        }
+
+        .subject-title {
+            font-size: 10.5px;
+            color: #64748b;
+        }
+
+        /* ---- Multiple Schedule/Room lines under one EDP Code row
+           (Face-to-Face + Online split, etc.) — same "one row, several
+           Schedule lines" layout as the Workload tab. ---- */
+        .schedule-lines {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
         /* ---- Classly text credit strip (sits above the school letterhead) ---- */
         .classly-brand {
             margin-bottom: 6px;
@@ -274,20 +295,7 @@
                         </thead>
                         <tbody>
                             @foreach($group['rows'] as $row)
-                                <tr>
-                                    <td>{{ $row['EDP Code'] ?? '—' }}</td>
-                                    <td>{{ $row['Subject Code'] ?? '—' }}</td>
-                                    <td>{{ $row['Subject'] ?? '—' }}</td>
-                                    <td>{{ $row['Faculty'] ?? '—' }}</td>
-                                    <td>{{ $row['Room'] ?? '—' }}</td>
-                                    <td>
-                                        @if(!empty($row['Day']) && !empty($row['Start']) && !empty($row['End']))
-                                            {{ $row['Day'] }} · {{ $row['Start'] }}–{{ $row['End'] }}
-                                        @else
-                                            —
-                                        @endif
-                                    </td>
-                                </tr>
+                                @include('reports.partials.section-schedule-row', ['row' => $row])
                             @endforeach
                         </tbody>
                     </table>
@@ -301,7 +309,10 @@
              format: EDP Code / Subject Code / Subject / Faculty / Room /
              Day & Time — Day+Start+End are merged into one "Day/Time"
              column here since the Section is already named once in the
-             header above rather than repeated per row. --}}
+             header above rather than repeated per row. A split subject
+             (Face-to-Face/Online) still prints as ONE row under its one
+             EDP Code, with each Schedule line stacked in the Room and
+             Day/Time cells — see section-schedule-row.blade.php. --}}
         <table>
             <thead>
                 <tr>
@@ -315,20 +326,7 @@
             </thead>
             <tbody>
                 @foreach($report['rows'] as $row)
-                    <tr>
-                        <td>{{ $row['EDP Code'] ?? '—' }}</td>
-                        <td>{{ $row['Subject Code'] ?? '—' }}</td>
-                        <td>{{ $row['Subject'] ?? '—' }}</td>
-                        <td>{{ $row['Faculty'] ?? '—' }}</td>
-                        <td>{{ $row['Room'] ?? '—' }}</td>
-                        <td>
-                            @if(!empty($row['Day']) && !empty($row['Start']) && !empty($row['End']))
-                                {{ $row['Day'] }} · {{ $row['Start'] }}–{{ $row['End'] }}
-                            @else
-                                —
-                            @endif
-                        </td>
-                    </tr>
+                    @include('reports.partials.section-schedule-row', ['row' => $row])
                 @endforeach
             </tbody>
         </table>
@@ -357,28 +355,17 @@
                     <table>
                         <thead>
                             <tr>
+                                <th>EDP Code</th>
                                 <th>Subject</th>
                                 <th>Section</th>
+                                <th>Schedule</th>
                                 <th>Room</th>
-                                <th>Day / Time</th>
-                                <th>Units</th>
+                                <th>Load</th>
                             </tr>
                         </thead>
                         <tbody>
                             @foreach($group['rows'] as $row)
-                                <tr>
-                                    <td>{{ $row['Subject'] ?? '—' }}</td>
-                                    <td>{{ $row['Section'] ?? '—' }}</td>
-                                    <td>{{ $row['Room'] ?? '—' }}</td>
-                                    <td>
-                                        @if(!empty($row['Day']) && !empty($row['Start']) && !empty($row['End']))
-                                            {{ $row['Day'] }} · {{ $row['Start'] }}–{{ $row['End'] }}
-                                        @else
-                                            —
-                                        @endif
-                                    </td>
-                                    <td>{{ $row['Units'] ?? '—' }}</td>
-                                </tr>
+                                @include('reports.partials.faculty-schedule-row', ['row' => $row])
                             @endforeach
                         </tbody>
                     </table>
@@ -387,6 +374,40 @@
                 @include('reports.partials.faculty-signoff', ['facultyName' => $group['label'], 'deans' => $group['deans'] ?? [], 'approvers' => $group['approvers'] ?? []])
             </div>
         @endforeach
+
+    @elseif($reportType === 'schedule_by_faculty' && !empty($report['facultyMeta']))
+
+        {{-- Single, explicitly-picked faculty: the faculty's name is
+             already named once above (here, in the section heading)
+             so it is never repeated per row — same "one name, many
+             subjects" layout as the Faculty Workload tab's Assigned
+             Subjects table, instead of a generic column dump with a
+             Faculty column repeating the same name on every line. --}}
+        <h2 class="section-heading">{{ $report['facultyMeta']['full_name'] }}</h2>
+
+        @if(empty($report['rows']))
+            <p class="empty">No schedule found for this faculty member.</p>
+        @else
+            <table>
+                <thead>
+                    <tr>
+                        <th>EDP Code</th>
+                        <th>Subject</th>
+                        <th>Section</th>
+                        <th>Schedule</th>
+                        <th>Room</th>
+                        <th>Load</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach($report['rows'] as $row)
+                        @include('reports.partials.faculty-schedule-row', ['row' => $row])
+                    @endforeach
+                </tbody>
+            </table>
+        @endif
+
+        @include('reports.partials.faculty-signoff', ['facultyName' => $report['facultyMeta']['full_name'], 'deans' => $report['facultyMeta']['deans'] ?? [], 'approvers' => $report['facultyMeta']['approvers'] ?? []])
 
     @else
 
@@ -410,10 +431,6 @@
                 @endforeach
             </tbody>
         </table>
-
-        @if($reportType === 'schedule_by_faculty' && !empty($report['facultyMeta']))
-            @include('reports.partials.faculty-signoff', ['facultyName' => $report['facultyMeta']['full_name'], 'deans' => $report['facultyMeta']['deans'] ?? [], 'approvers' => $report['facultyMeta']['approvers'] ?? []])
-        @endif
 
     @endif
 

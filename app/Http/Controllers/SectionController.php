@@ -133,7 +133,7 @@ class SectionController extends Controller
             $schedulingStatus = 'all';
         }
 
-        $sections = Section::query()
+        $sectionsQuery = Section::query()
             ->visibleTo($request->user())
             ->with(['major:id,name,code', 'curriculum:id,code,name,major_id'])
             ->when($term !== 'all', function ($query) use ($term) {
@@ -154,35 +154,15 @@ class SectionController extends Controller
             })
             ->when($schedulingStatus !== 'all', function ($query) use ($schedulingStatus) {
                 $this->applySchedulingStatusFilter($query, $schedulingStatus);
-            })
-            // Scheduling-progress indicator for the list — counts every
-            // placement that has Faculty, Room, Days, Start, and End
-            // Time all filled in, regardless of the row's `status`
-            // column. A Section can show "12/12 assigned" here while
-            // its rows still say Draft, because Auto Generate results
-            // aren't finalized (status flips to Scheduled) until the
-            // Registrar clicks Accept All & Save — this count answers
-            // "has this section already been worked on?", not "is it
-            // finalized?".
-            ->withCount([
-                'sectionSubjects as total_subjects_count',
-                // Practicum/OJT rows never have Faculty/Room/Days/Time
-                // to fill in (see Subject::isPracticum()) — a row for
-                // one of those subjects counts as "assigned" simply by
-                // existing, same as SectionSubjectController's status
-                // logic treats it as immediately 'Scheduled'.
-                'sectionSubjects as assigned_subjects_count' => function ($query) {
-                    $query->where(function ($inner) {
-                        $inner->whereNotNull('faculty_id')
-                            ->whereNotNull('room_id')
-                            ->whereNotNull('days')
-                            ->whereNotNull('start_time')
-                            ->whereNotNull('end_time');
-                    })->orWhereHas('subject', function ($subjectQuery) {
-                        $subjectQuery->where('subject_type', 'practicum');
-                    });
-                },
-            ])
+            });
+
+        // Scheduling-progress indicator for the list ("Fully/Partially
+        // Scheduled (x/y)") — counts distinct SUBJECTS, not
+        // section_subjects rows, so a split Face-to-Face/Online subject
+        // counts once, not twice. See Section::withSubjectProgressCounts().
+        $sectionsQuery = Section::withSubjectProgressCounts($sectionsQuery);
+
+        $sections = $sectionsQuery
             ->when($search !== '', function ($query) use ($search) {
                 $query->where(function ($inner) use ($search) {
                     $inner->where('section_code', 'like', "%{$search}%")
@@ -738,10 +718,17 @@ class SectionController extends Controller
             ->where(function ($query) {
                 $query->where(function ($inner) {
                     $inner->whereNotNull('faculty_id')
-                        ->whereNotNull('room_id')
                         ->whereNotNull('days')
                         ->whereNotNull('start_time')
-                        ->whereNotNull('end_time');
+                        ->whereNotNull('end_time')
+                        // Online rows are intentionally saved with
+                        // room_id = null ("no room needed") — only
+                        // require a Room for Face-to-Face rows, matching
+                        // the same rule in index()'s assigned_subjects_count.
+                        ->where(function ($roomCheck) {
+                            $roomCheck->whereNotNull('room_id')
+                                ->orWhere('delivery_mode', 'online');
+                        });
                 })->orWhereHas('subject', function ($subjectQuery) {
                     $subjectQuery->where('subject_type', 'practicum');
                 });
@@ -886,10 +873,18 @@ class SectionController extends Controller
     {
         return $query->where(function ($inner) {
             $inner->whereNull('faculty_id')
-                ->orWhereNull('room_id')
                 ->orWhereNull('days')
                 ->orWhereNull('start_time')
-                ->orWhereNull('end_time');
+                ->orWhereNull('end_time')
+                // Online rows are intentionally saved with room_id =
+                // null ("no room needed") — only require a Room for
+                // Face-to-Face rows, matching the same rule
+                // Section::withSubjectProgressCounts() and
+                // SectionSubjectController::index() use.
+                ->orWhere(function ($needsRoom) {
+                    $needsRoom->whereNull('room_id')
+                        ->where('delivery_mode', '!=', 'online');
+                });
         })->whereDoesntHave('subject', function ($subjectQuery) {
             $subjectQuery->where('subject_type', 'practicum');
         });

@@ -30,13 +30,13 @@ const alertItems = computed(() => {
     if (props.alerts.no_faculty > 0) {
         items.push({
             text: `${props.alerts.no_faculty} subject${props.alerts.no_faculty === 1 ? '' : 's'} have no faculty assigned.`,
-            href: route('scheduling.section-subjects'),
+            href: route('scheduling.sections'),
         });
     }
     if (props.alerts.no_room > 0) {
         items.push({
             text: `${props.alerts.no_room} subject${props.alerts.no_room === 1 ? '' : 's'} have no room assigned.`,
-            href: route('scheduling.section-subjects'),
+            href: route('scheduling.sections'),
         });
     }
     if (props.alerts.faculty_overload > 0) {
@@ -54,7 +54,7 @@ const alertItems = computed(() => {
     if (props.alerts.sections_needing_scheduling > 0) {
         items.push({
             text: `${props.alerts.sections_needing_scheduling} section${props.alerts.sections_needing_scheduling === 1 ? '' : 's'} still require manual scheduling.`,
-            href: route('scheduling.section-subjects'),
+            href: route('scheduling.sections'),
         });
     }
     return items;
@@ -63,11 +63,20 @@ const alertItems = computed(() => {
 // Summary stat cards — icon, accent color, and glow per card. Kept
 // inline (rather than the shared KpiCard, which only defines 4 accent
 // colors) since this dashboard needs seven distinct accents at a glance.
+//
+// NOTE: 'remaining_subjects' links to scheduling.sections (the
+// sidebar's actively-maintained Sections list — Type/Prospectus/
+// Scheduling-status columns), NOT scheduling.section-subjects (an
+// older, thinner list page with the same rows but fewer columns).
+// Both pages exist and both eventually reach the same section detail
+// view, but sending Dashboard traffic to the stale one is why it used
+// to look like a "different" Sections page depending on how you got
+// there — same fix applied to every alert href above.
 const statCards = computed(() => [
     { key: 'total_sections', label: 'Sections', value: props.stats.total_sections, icon: 'pi-th-large', color: isDark.value ? '#5B9CFF' : '#2563EB', glow: isDark.value ? 'rgba(91, 156, 255, 0.3)' : 'rgba(37, 99, 235, 0.25)' },
     { key: 'total_subjects', label: 'Subjects', value: props.stats.total_subjects, icon: 'pi-book', color: isDark.value ? '#5B9CFF' : '#2563EB', glow: isDark.value ? 'rgba(91, 156, 255, 0.3)' : 'rgba(37, 99, 235, 0.25)' },
     { key: 'scheduled_subjects', label: 'Successfully Scheduled', value: props.stats.scheduled_subjects, icon: 'pi-check-circle', color: isDark.value ? '#34D399' : '#059669', glow: isDark.value ? 'rgba(52, 211, 153, 0.3)' : 'rgba(5, 150, 105, 0.25)' },
-    { key: 'remaining_subjects', label: 'Needs Scheduling', value: props.stats.remaining_subjects, icon: 'pi-exclamation-circle', color: isDark.value ? '#FBBF24' : '#D97706', glow: isDark.value ? 'rgba(251, 191, 36, 0.3)' : 'rgba(217, 119, 6, 0.25)', href: route('scheduling.section-subjects') },
+    { key: 'remaining_subjects', label: 'Needs Scheduling', value: props.stats.remaining_subjects, icon: 'pi-exclamation-circle', color: isDark.value ? '#FBBF24' : '#D97706', glow: isDark.value ? 'rgba(251, 191, 36, 0.3)' : 'rgba(217, 119, 6, 0.25)', href: route('scheduling.sections') },
     { key: 'completion', label: 'Complete', value: `${props.stats.completion}%`, icon: 'pi-percentage', color: isDark.value ? '#5B9CFF' : '#2563EB', glow: isDark.value ? 'rgba(91, 156, 255, 0.3)' : 'rgba(37, 99, 235, 0.25)' },
     { key: 'active_rooms', label: 'Rooms Used', value: props.stats.active_rooms, icon: 'pi-building', color: isDark.value ? '#C4B5FD' : '#7C3AED', glow: isDark.value ? 'rgba(196, 181, 253, 0.3)' : 'rgba(124, 58, 237, 0.25)' },
     { key: 'active_faculty', label: 'Faculty Assigned', value: props.stats.active_faculty, icon: 'pi-users', color: isDark.value ? '#C4B5FD' : '#7C3AED', glow: isDark.value ? 'rgba(196, 181, 253, 0.3)' : 'rgba(124, 58, 237, 0.25)' },
@@ -88,9 +97,9 @@ const activityStatusSeverity = (status) => {
 };
 
 const quickActions = [
-    { label: 'Generate All Schedules', icon: 'pi-bolt', href: 'scheduling.section-subjects', accent: true },
-    { label: 'Validate Schedules', icon: 'pi-check-square', href: 'scheduling.section-subjects' },
-    { label: 'Detect Conflicts', icon: 'pi-search', href: 'scheduling.section-subjects' },
+    { label: 'Generate All Schedules', icon: 'pi-bolt', href: 'scheduling.sections', accent: true },
+    { label: 'Validate Schedules', icon: 'pi-check-square', href: 'scheduling.sections' },
+    { label: 'Detect Conflicts', icon: 'pi-search', href: 'scheduling.sections' },
     // Reuses the existing Master Schedule report (Reports > Scheduling)
     // rather than a separate export — passing report_type in the query
     // makes ReportsController generate it immediately on load, so this

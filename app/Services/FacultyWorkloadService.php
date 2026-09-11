@@ -227,7 +227,11 @@ class FacultyWorkloadService
      */
     public function assignedSubjectsCount(Faculty $faculty, ?int $excludingSectionSubjectId = null): int
     {
-        return $this->activePlacements($faculty, $excludingSectionSubjectId)->count();
+        // Same dedup as sumLoad() — a split Face-to-Face/Online pair is
+        // one assigned Subject, not two.
+        return $this->activePlacements($faculty, $excludingSectionSubjectId)
+            ->unique(fn (SectionSubject $ss) => $ss->section_id.'-'.$ss->subject_id)
+            ->count();
     }
 
     /**
@@ -248,11 +252,22 @@ class FacultyWorkloadService
      * sitting in that one hour without the class being counted (or
      * its load charged) twice.
      *
+     * SPLIT-DELIVERY SCHEDULING — a Face-to-Face/Online split pair
+     * (same section_id + subject_id) is grouped into ONE array entry
+     * here, not two, so it reads as one assigned Subject with two
+     * Schedule lines rather than the Subject's Units appearing to
+     * double. See this method's inline docblock for the grouping rule
+     * and sumLoad()'s docblock for why the double-count mattered.
+     *
      * @return array<int, array{
      *     id: int, edp_code: ?string, subject_code: ?string,
      *     subject_title: ?string, units: int, load: int,
-     *     section_code: ?string, room_name: ?string, days: ?string,
-     *     start_time: ?string, end_time: ?string, status: ?string,
+     *     section_code: ?string, status: ?string,
+     *     schedules: array<int, array{
+     *         id: int, section_id: int, delivery_mode: ?string,
+     *         room_id: ?int, room_name: ?string, days: ?string,
+     *         start_time: ?string, end_time: ?string, status: ?string,
+     *     }>,
      * }>
      */
     public function assignedPlacements(Faculty $faculty, ?int $excludingSectionSubjectId = null): array
@@ -273,67 +288,83 @@ class FacultyWorkloadService
                 'mergedPlacements.section:id,section_code',
             ])
             ->get()
-            ->filter(fn (SectionSubject $ss) => $ss->subject !== null)
-            ->sortBy(fn (SectionSubject $ss) => $ss->subject->subject_code)
-            ->values();
+            ->filter(fn (SectionSubject $ss) => $ss->subject !== null);
 
         $usesHours = $this->usesHours($faculty);
 
-        return $placements->map(function (SectionSubject $ss) use ($usesHours) {
-            $sectionCodes = collect([$ss->section?->section_code])
-                ->merge($ss->mergedPlacements->pluck('section.section_code'))
-                ->filter()
-                ->unique()
-                ->values();
+        // SPLIT-DELIVERY SCHEDULING — group by section_id+subject_id so
+        // a Face-to-Face/Online split pair renders (and is edited) as
+        // ONE row with two Schedule lines, instead of two separate rows
+        // that (before this fix) double-counted the subject's Units in
+        // the "Load" column shown for each — same dedup key sumLoad()
+        // uses for Current Load, so this table's total always matches
+        // the summary card above it.
+        return $placements
+            ->groupBy(fn (SectionSubject $ss) => $ss->section_id.'-'.$ss->subject_id)
+            ->map(function ($group) use ($usesHours) {
+                // The Face-to-Face half (or the only row, for a Subject
+                // that was never split) is the group's "primary" row —
+                // its id/edp_code identifies the whole group. An Online
+                // row is never primary on its own: the Registrar already
+                // recognizes a split Subject+Section by its Face-to-Face
+                // half's EDP Code from the Scheduling Workspace.
+                $primary = $group->first(fn (SectionSubject $ss) => $ss->delivery_mode !== 'online') ?? $group->first();
 
-            return [
-                'id' => $ss->id,
-                // Needed by the Faculty Details page's inline schedule
-                // editor: the Room options endpoint
-                // (scheduling.section-subjects.rooms) is Section-scoped,
-                // and the save itself goes through the Room Grid's
-                // cross-section move endpoint
-                // (scheduling.room-grid.move), which authorizes against
-                // THIS row's own Section regardless of what Section (if
-                // any) is "currently open" elsewhere in the UI — see
-                // SectionSubjectController::moveRoomGridAssignment().
-                'section_id' => $ss->section_id,
-                'edp_code' => $ss->edp_code,
-                'subject_code' => $ss->subject->subject_code,
-                'subject_title' => $ss->subject->subject_title,
-                'units' => (int) $ss->subject->units,
-                'load' => $usesHours
-                    ? (int) $ss->subject->lecture_hours + (int) $ss->subject->laboratory_hours
-                    : (int) $ss->subject->units,
-                // Lets the Faculty Details page's Room picker put
-                // Laboratory rooms first for a subject that needs lab
-                // time — same "wants Laboratory" signal SectionSubjects/
-                // Show.vue's own Room dropdown groups on
-                // (subject.laboratory_hours > 0).
-                'requires_lab' => (int) $ss->subject->laboratory_hours > 0,
-                // The Subject's real required weekly teaching hours —
-                // same value + fallback rule
-                // SectionSubjectController::performScheduleAssignmentUpdate()'s
-                // Weekly Hours Mismatch check uses (lecture + laboratory
-                // hours, defaulting to 3 when the Subject has neither
-                // set). Lets the Faculty Details page's "Suggest
-                // Available Time" filter out incomplete candidates
-                // before they're ever shown, instead of only catching
-                // the mismatch after the Registrar tries to Save.
-                'required_hours' => ((int) $ss->subject->lecture_hours + (int) $ss->subject->laboratory_hours) ?: 3,
-                // Host + every merged rider's Section Code, joined
-                // with " & " (e.g. "BSIT-4A & BSIT-4A-IRREG") — falls
-                // back to the plain single Section Code when nothing
-                // is merged into this row.
-                'section_code' => $sectionCodes->implode(' & '),
-                'room_id' => $ss->room_id,
-                'room_name' => $ss->room?->room_name,
-                'days' => $ss->days,
-                'start_time' => $ss->start_time,
-                'end_time' => $ss->end_time,
-                'status' => $ss->status,
-            ];
-        })->all();
+                $sectionCodes = collect([$primary->section?->section_code])
+                    ->merge($primary->mergedPlacements->pluck('section.section_code'))
+                    ->filter()
+                    ->unique()
+                    ->values();
+
+                return [
+                    'id' => $primary->id,
+                    'section_id' => $primary->section_id,
+                    'edp_code' => $primary->edp_code,
+                    'subject_code' => $primary->subject->subject_code,
+                    'subject_title' => $primary->subject->subject_title,
+                    'units' => (int) $primary->subject->units,
+                    // Counted ONCE per group, never per row — see this
+                    // method's docblock.
+                    'load' => $usesHours
+                        ? (int) $primary->subject->lecture_hours + (int) $primary->subject->laboratory_hours
+                        : (int) $primary->subject->units,
+                    'requires_lab' => (int) $primary->subject->laboratory_hours > 0,
+                    'required_hours' => ((int) $primary->subject->lecture_hours + (int) $primary->subject->laboratory_hours) ?: 3,
+                    'section_code' => $sectionCodes->implode(' & '),
+                    // Group-level Status: 'Scheduled' only once EVERY
+                    // row in the group is — mirrors
+                    // Section::withSubjectProgressCounts()'s same
+                    // "every component row must be done" rule, so a
+                    // Draft Online half with an already-Scheduled
+                    // Face-to-Face half still reads as needing
+                    // attention rather than as fully Scheduled.
+                    'status' => $group->every(fn (SectionSubject $ss) => $ss->status === 'Scheduled') ? 'Scheduled' : 'Draft',
+                    // One entry per delivery-mode row in the group — a
+                    // never-split Subject has exactly one (same single
+                    // Schedule line as before this change); a split
+                    // Subject has two (Face-to-Face, then Online),
+                    // each independently editable in the Faculty
+                    // Details page's inline editor.
+                    'schedules' => $group
+                        ->sortBy(fn (SectionSubject $ss) => $ss->delivery_mode === 'online' ? 1 : 0)
+                        ->map(fn (SectionSubject $ss) => [
+                            'id' => $ss->id,
+                            'section_id' => $ss->section_id,
+                            'delivery_mode' => $ss->delivery_mode,
+                            'room_id' => $ss->room_id,
+                            'room_name' => $ss->delivery_mode === 'online' ? 'Online' : $ss->room?->room_name,
+                            'days' => $ss->days,
+                            'start_time' => $ss->start_time,
+                            'end_time' => $ss->end_time,
+                            'status' => $ss->status,
+                        ])
+                        ->values()
+                        ->all(),
+                ];
+            })
+            ->sortBy('subject_code')
+            ->values()
+            ->all();
     }
 
     /**
@@ -558,14 +589,29 @@ class FacultyWorkloadService
     {
         $usesHours = $this->usesHours($faculty);
 
-        return $placements->sum(function (SectionSubject $ss) use ($usesHours) {
-            if (! $ss->subject) {
-                return 0;
-            }
-
-            return $usesHours
-                ? (int) $ss->subject->lecture_hours + (int) $ss->subject->laboratory_hours
-                : (int) $ss->subject->units;
-        });
+        // SPLIT-DELIVERY SCHEDULING — a Face-to-Face/Online split pair
+        // (same section_id + subject_id — see
+        // SectionSubject::isSplitComponent()) is stored as TWO rows but
+        // is only ONE class this Faculty member teaches. Summing every
+        // row's units/hours — as this used to do — silently DOUBLED a
+        // split subject's contribution to the Faculty's load: a 3-unit
+        // subject split into a Face-to-Face row and an Online row
+        // counted as 6, inflating Current Load (and therefore every
+        // Teaching Load Limit check that relies on it — Auto Generate,
+        // Recommend Faculty, Save Schedule) for any Faculty teaching
+        // even one split subject. Deduping by section_id+subject_id
+        // first — counting that pair's units/hours once, however many
+        // delivery-mode rows it's split into — fixes that. A Faculty
+        // teaching the SAME subject across two DIFFERENT Sections is
+        // still counted twice, correctly, since that's two distinct
+        // classes, not one split one.
+        return $placements
+            ->filter(fn (SectionSubject $ss) => $ss->subject !== null)
+            ->unique(fn (SectionSubject $ss) => $ss->section_id.'-'.$ss->subject_id)
+            ->sum(function (SectionSubject $ss) use ($usesHours) {
+                return $usesHours
+                    ? (int) $ss->subject->lecture_hours + (int) $ss->subject->laboratory_hours
+                    : (int) $ss->subject->units;
+            });
     }
 }

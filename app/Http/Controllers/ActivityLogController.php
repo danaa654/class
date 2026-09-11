@@ -9,9 +9,13 @@ use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 
 /**
- * ACTIVITY LOG — Administrator-only "who did what, when" tab on the
- * Settings page, same pattern as ActiveSessionController: a plain
- * static builder method called from SettingsController::index()
+ * ACTIVITY LOG — "who did what, when" tab on the Settings page,
+ * visible to Administrator and Registrar (see
+ * SettingsController::index()'s $canViewAuditData) — same pattern as
+ * ActiveSessionController's builder, but Active Sessions itself stays
+ * Administrator-only since that's a stricter "who's online right
+ * now" concern rather than an audit-trail one.
+ * A plain static builder method called from SettingsController::index()
  * (wrapped in Inertia::lazy() so it's only queried when the tab is
  * actually opened or its filters change — see the
  * `router.reload({ only: ['activityLog'] })` calls on the frontend).

@@ -272,7 +272,7 @@ const onUpdateAccount = () => {
                     <Tab v-if="has('general')" value="general">General</Tab>
                     <Tab v-if="has('academic')" value="academic">Academic</Tab>
                     <Tab v-if="has('workload')" value="workload">Faculty &amp; Workload</Tab>
-                    <Tab v-if="has('system')" value="activeSessions">Active Sessions</Tab>
+                    <Tab v-if="has('system') && isAdministrator" value="activeSessions">Active Sessions</Tab>
                     <Tab v-if="has('system')" value="activityLog">Activity Log</Tab>
                     <Tab v-if="has('system')" value="system">System</Tab>
                     <Tab v-if="!isAdministrator" value="account">Manage Account</Tab>
@@ -401,7 +401,7 @@ const onUpdateAccount = () => {
                     </TabPanel>
 
                     <!-- ============================== ACTIVE SESSIONS ============================== -->
-                    <TabPanel v-if="has('system')" value="activeSessions">
+                    <TabPanel v-if="has('system') && isAdministrator" value="activeSessions">
                         <div class="neu-card rounded-2xl p-6 transition-colors duration-300">
                         <Card class="!rounded-2xl !bg-transparent !border-0 !shadow-none" :pt="{ body: { class: '!bg-transparent !p-0' } }">
                             <template #content>
@@ -475,7 +475,7 @@ const onUpdateAccount = () => {
                                         <h2 class="text-lg font-bold text-[#1E293B] mb-1">Activity Log</h2>
                                         <p class="text-sm text-slate-500 max-w-2xl">
                                             A record of important actions across Classly — who did what, and when.
-                                            Visible to Administrators only.
+                                            Visible to Administrators and Registrars only.
                                         </p>
                                     </div>
                                     <Button icon="pi pi-refresh" label="Refresh" text @click="reloadActivityLog()" />
@@ -576,7 +576,7 @@ const onUpdateAccount = () => {
                         <Card class="!rounded-2xl !bg-transparent !border-0 !shadow-none" :pt="{ body: { class: '!bg-transparent !p-0' } }">
                             <template #content>
                                 <h2 class="text-lg font-bold text-[#1E293B] mb-1">System / Maintenance</h2>
-                                <p class="text-sm text-slate-500 mb-5">Visible to Administrators only.</p>
+                                <p class="text-sm text-slate-500 mb-5">Visible to Administrators and Registrars only.</p>
 
                                 <div class="grid grid-cols-2 sm:grid-cols-3 gap-4 text-sm mb-6">
                                     <div><span class="text-slate-400 block">Application Version</span>{{ system.app_version }}</div>
@@ -588,7 +588,8 @@ const onUpdateAccount = () => {
                                     <div><span class="text-slate-400 block">Last Configuration Update</span>{{ system.last_configuration_update ?? '—' }}</div>
                                 </div>
 
-                                <Button label="Refresh Configuration Cache" icon="pi pi-refresh" severity="secondary" outlined :loading="refreshingCache" @click="refreshCache" />
+                                <Button v-if="isAdministrator" label="Refresh Configuration Cache" icon="pi pi-refresh" severity="secondary" outlined :loading="refreshingCache" @click="refreshCache" />
+                                <p v-else class="text-xs text-slate-400">Only Administrators can refresh the configuration cache.</p>
                             </template>
                         </Card>
                         </div>

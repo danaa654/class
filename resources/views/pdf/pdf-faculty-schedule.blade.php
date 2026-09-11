@@ -9,11 +9,13 @@
     // total seen before this fix.
     $totalHours = 0;
     foreach ($rows as $row) {
-        if (!empty($row['start_time']) && !empty($row['end_time'])) {
-            $start = \Carbon\Carbon::parse($row['start_time']);
-            $end = \Carbon\Carbon::parse($row['end_time']);
-            $dayCount = count(array_filter(explode(',', (string) ($row['days'] ?? ''))));
-            $totalHours += abs($end->diffInMinutes($start)) / 60 * max($dayCount, 1);
+        foreach ($row['schedules'] ?? [] as $schedule) {
+            if (!empty($schedule['start_time']) && !empty($schedule['end_time'])) {
+                $start = \Carbon\Carbon::parse($schedule['start_time']);
+                $end = \Carbon\Carbon::parse($schedule['end_time']);
+                $dayCount = count(array_filter(explode(',', (string) ($schedule['days'] ?? ''))));
+                $totalHours += abs($end->diffInMinutes($start)) / 60 * max($dayCount, 1);
+            }
         }
     }
 @endphp
@@ -42,8 +44,11 @@
             font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em;
             padding: 7px 8px;
         }
-        table.schedule tbody td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; }
+        table.schedule tbody td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; vertical-align: top; }
         table.schedule tbody tr:nth-child(even) { background: #f8fafc; }
+        .subject-code { font-weight: 700; color: #1e293b; }
+        .subject-title { font-size: 9.5px; color: #64748b; }
+        .schedule-lines div + div { margin-top: 6px; }
 
         .totals { margin-top: 14px; font-size: 11.5px; text-align: right; font-weight: 700; color: #1e293b; }
 
@@ -90,28 +95,55 @@
     <table class="schedule">
         <thead>
             <tr>
-                <th>Subject Code</th>
-                <th>Subject Title</th>
+                <th>EDP Code</th>
+                <th>Subject</th>
                 <th>Section</th>
+                <th>Schedule</th>
                 <th>Room</th>
-                <th>Day</th>
-                <th>Start</th>
-                <th>End</th>
+                <th>Load</th>
             </tr>
         </thead>
         <tbody>
             @forelse($rows as $row)
                 <tr>
-                    <td>{{ $row['subject_code'] ?? '—' }}</td>
-                    <td>{{ $row['subject_title'] ?? '—' }}</td>
+                    <td>{{ $row['edp_code'] ?? '—' }}</td>
+                    <td>
+                        <div class="subject-code">{{ $row['subject_code'] ?? '—' }}</div>
+                        <div class="subject-title">{{ $row['subject_title'] ?? '—' }}</div>
+                    </td>
                     <td>{{ $row['section'] ?? '—' }}</td>
-                    <td>{{ $row['room'] ?? '—' }}</td>
-                    <td>{{ $row['days'] ?? '—' }}</td>
-                    <td>{{ !empty($row['start_time']) ? \Carbon\Carbon::parse($row['start_time'])->format('g:i A') : '—' }}</td>
-                    <td>{{ !empty($row['end_time']) ? \Carbon\Carbon::parse($row['end_time'])->format('g:i A') : '—' }}</td>
+                    <td>
+                        @if(!empty($row['schedules']))
+                            <div class="schedule-lines">
+                                @foreach($row['schedules'] as $schedule)
+                                    <div>
+                                        @if(!empty($schedule['days']) && !empty($schedule['start_time']) && !empty($schedule['end_time']))
+                                            {{ $schedule['days'] }} · {{ \Carbon\Carbon::parse($schedule['start_time'])->format('g:i A') }}–{{ \Carbon\Carbon::parse($schedule['end_time'])->format('g:i A') }}
+                                        @else
+                                            —
+                                        @endif
+                                    </div>
+                                @endforeach
+                            </div>
+                        @else
+                            —
+                        @endif
+                    </td>
+                    <td>
+                        @if(!empty($row['schedules']))
+                            <div class="schedule-lines">
+                                @foreach($row['schedules'] as $schedule)
+                                    <div>{{ $schedule['room'] ?? '—' }}</div>
+                                @endforeach
+                            </div>
+                        @else
+                            —
+                        @endif
+                    </td>
+                    <td>{{ $row['units'] ?? '—' }} Units</td>
                 </tr>
             @empty
-                <tr><td colspan="7">No schedule rows found.</td></tr>
+                <tr><td colspan="6">No schedule rows found.</td></tr>
             @endforelse
         </tbody>
     </table>

@@ -339,6 +339,31 @@ const assignedPlacements = computed(() => workload.value?.assigned_placements ??
 // Reuses the formatTime(time) helper declared above —
 // same 'HH:mm'/'HH:mm:ss' -> 12-hour am/pm formatting applies here.
 
+// SPLIT-DELIVERY SCHEDULING — assignedPlacements() now groups a
+// Face-to-Face/Online split pair into ONE `data` row with a
+// `data.schedules` array (one entry per delivery-mode row) instead of
+// two separate top-level rows — see
+// FacultyWorkloadService::assignedPlacements()'s docblock. The
+// Schedule/Room/Actions columns below render one line per
+// `data.schedules` entry so a split subject shows both its
+// Face-to-Face and Online lines under a single EDP Code/Subject/Load,
+// while a never-split subject (schedules.length === 1) looks exactly
+// as it did before this change.
+//
+// startEditPlacement()/saveEditPlacement()/fetchTimeSuggestions()
+// were all written against a flat placement object (id, section_id,
+// subject_code, requires_lab, required_hours, room_id, room_name,
+// days, start_time, end_time) — this merges a `data.schedules` entry
+// (which only carries its OWN id/section_id/room/days/time) with the
+// group-level fields those three functions also need, rather than
+// changing their signatures.
+const scheduleEditTarget = (data, schedule) => ({
+    ...schedule,
+    subject_code: data.subject_code,
+    requires_lab: data.requires_lab,
+    required_hours: data.required_hours,
+});
+
 const placementStatusSeverity = (status) => {
     switch (status) {
         case 'Scheduled':
@@ -961,76 +986,84 @@ const saveEditPlacement = async (placement, confirmedKeys = {}) => {
                                         </Column>
                                         <Column header="Schedule">
                                             <template #body="{ data }">
-                                                <div v-if="editingPlacementId === data.id" class="flex flex-col gap-1.5">
-                                                    <MultiSelect
-                                                        v-model="editForm.days"
-                                                        :options="DAY_TOKENS"
-                                                        placeholder="Days"
-                                                        class="w-full text-xs"
-                                                        display="chip"
-                                                    />
-                                                    <div class="flex items-center gap-1.5">
-                                                        <input v-model="editForm.start_time" type="time" class="w-full rounded border border-slate-300 px-2 py-1 text-xs" />
-                                                        <span class="text-slate-400">–</span>
-                                                        <input v-model="editForm.end_time" type="time" class="w-full rounded border border-slate-300 px-2 py-1 text-xs" />
-                                                    </div>
-                                                    <small v-if="editErrors.days" class="text-red-600">{{ editErrors.days }}</small>
-                                                    <small v-if="editErrors.start_time" class="text-red-600">{{ editErrors.start_time }}</small>
-                                                    <small v-if="editErrors.end_time" class="text-red-600">{{ editErrors.end_time }}</small>
-                                                    <small v-if="editErrors.hours" class="text-red-600">{{ editErrors.hours }}</small>
+                                                <div class="flex flex-col gap-2.5">
+                                                    <div v-for="schedule in data.schedules" :key="schedule.id">
+                                                        <div v-if="editingPlacementId === schedule.id" class="flex flex-col gap-1.5">
+                                                            <MultiSelect
+                                                                v-model="editForm.days"
+                                                                :options="DAY_TOKENS"
+                                                                placeholder="Days"
+                                                                class="w-full text-xs"
+                                                                display="chip"
+                                                            />
+                                                            <div class="flex items-center gap-1.5">
+                                                                <input v-model="editForm.start_time" type="time" class="w-full rounded border border-slate-300 px-2 py-1 text-xs" />
+                                                                <span class="text-slate-400">–</span>
+                                                                <input v-model="editForm.end_time" type="time" class="w-full rounded border border-slate-300 px-2 py-1 text-xs" />
+                                                            </div>
+                                                            <small v-if="editErrors.days" class="text-red-600">{{ editErrors.days }}</small>
+                                                            <small v-if="editErrors.start_time" class="text-red-600">{{ editErrors.start_time }}</small>
+                                                            <small v-if="editErrors.end_time" class="text-red-600">{{ editErrors.end_time }}</small>
+                                                            <small v-if="editErrors.hours" class="text-red-600">{{ editErrors.hours }}</small>
 
-                                                    <Button
-                                                        label="Suggest Available Time"
-                                                        icon="pi pi-sparkles"
-                                                        size="small"
-                                                        text
-                                                        :loading="editTimeSuggestionsLoading"
-                                                        class="!text-xs !p-0 !justify-start"
-                                                        @click="fetchTimeSuggestions(data)"
-                                                    />
-                                                    <div v-if="editTimeSuggestions.length" class="flex flex-col gap-1">
-                                                        <button
-                                                            v-for="(s, idx) in editTimeSuggestions"
-                                                            :key="idx"
-                                                            type="button"
-                                                            class="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-left text-xs text-emerald-700 hover:bg-emerald-100"
-                                                            @click="applyTimeSuggestion(s)"
-                                                        >
-                                                            {{ s.days.join(', ') }} &middot; {{ formatTime(s.start_time) }}–{{ formatTime(s.end_time) }}
-                                                        </button>
+                                                            <Button
+                                                                label="Suggest Available Time"
+                                                                icon="pi pi-sparkles"
+                                                                size="small"
+                                                                text
+                                                                :loading="editTimeSuggestionsLoading"
+                                                                class="!text-xs !p-0 !justify-start"
+                                                                @click="fetchTimeSuggestions(scheduleEditTarget(data, schedule))"
+                                                            />
+                                                            <div v-if="editTimeSuggestions.length" class="flex flex-col gap-1">
+                                                                <button
+                                                                    v-for="(s, idx) in editTimeSuggestions"
+                                                                    :key="idx"
+                                                                    type="button"
+                                                                    class="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-left text-xs text-emerald-700 hover:bg-emerald-100"
+                                                                    @click="applyTimeSuggestion(s)"
+                                                                >
+                                                                    {{ s.days.join(', ') }} &middot; {{ formatTime(s.start_time) }}–{{ formatTime(s.end_time) }}
+                                                                </button>
+                                                            </div>
+                                                            <small v-else-if="editTimeSuggestionsMessage" class="text-slate-400">{{ editTimeSuggestionsMessage }}</small>
+                                                        </div>
+                                                        <span v-else-if="schedule.days">
+                                                            {{ schedule.days }} &middot; {{ formatTime(schedule.start_time) }}–{{ formatTime(schedule.end_time) }}
+                                                        </span>
+                                                        <span v-else class="text-slate-400">Not yet scheduled</span>
                                                     </div>
-                                                    <small v-else-if="editTimeSuggestionsMessage" class="text-slate-400">{{ editTimeSuggestionsMessage }}</small>
                                                 </div>
-                                                <span v-else-if="data.days">
-                                                    {{ data.days }} &middot; {{ formatTime(data.start_time) }}–{{ formatTime(data.end_time) }}
-                                                </span>
-                                                <span v-else class="text-slate-400">Not yet scheduled</span>
                                             </template>
                                         </Column>
                                         <Column field="room_name" header="Room">
                                             <template #body="{ data }">
-                                                <div v-if="editingPlacementId === data.id" class="flex flex-col gap-1.5">
-                                                    <Select
-                                                        v-model="editForm.room_id"
-                                                        :options="editRoomOptions"
-                                                        optionLabel="room_name"
-                                                        optionValue="id"
-                                                        optionGroupLabel="label"
-                                                        optionGroupChildren="rooms"
-                                                        :loading="editRoomsLoading"
-                                                        placeholder="Select room"
-                                                        showClear
-                                                        class="w-full text-xs"
-                                                    >
-                                                        <template #optiongroup="{ option }">
-                                                            <span class="text-xs font-semibold tracking-wide text-slate-400 uppercase">{{ option.label }}</span>
-                                                        </template>
-                                                    </Select>
-                                                    <small v-if="editErrors.room_id" class="text-red-600">{{ editErrors.room_id }}</small>
-                                                    <small v-if="editErrors.room_type" class="text-red-600">{{ editErrors.room_type }}</small>
-                                                    <small v-if="editErrors.room_college" class="text-red-600">{{ editErrors.room_college }}</small>
+                                                <div class="flex flex-col gap-2.5">
+                                                    <div v-for="schedule in data.schedules" :key="schedule.id">
+                                                        <div v-if="editingPlacementId === schedule.id" class="flex flex-col gap-1.5">
+                                                            <Select
+                                                                v-model="editForm.room_id"
+                                                                :options="editRoomOptions"
+                                                                optionLabel="room_name"
+                                                                optionValue="id"
+                                                                optionGroupLabel="label"
+                                                                optionGroupChildren="rooms"
+                                                                :loading="editRoomsLoading"
+                                                                placeholder="Select room"
+                                                                showClear
+                                                                class="w-full text-xs"
+                                                            >
+                                                                <template #optiongroup="{ option }">
+                                                                    <span class="text-xs font-semibold tracking-wide text-slate-400 uppercase">{{ option.label }}</span>
+                                                                </template>
+                                                            </Select>
+                                                            <small v-if="editErrors.room_id" class="text-red-600">{{ editErrors.room_id }}</small>
+                                                            <small v-if="editErrors.room_type" class="text-red-600">{{ editErrors.room_type }}</small>
+                                                            <small v-if="editErrors.room_college" class="text-red-600">{{ editErrors.room_college }}</small>
+                                                        </div>
+                                                        <span v-else>{{ schedule.room_name || '—' }}</span>
+                                                    </div>
                                                 </div>
-                                                <span v-else>{{ data.room_name || '—' }}</span>
                                             </template>
                                         </Column>
                                         <Column header="Load">
@@ -1043,25 +1076,29 @@ const saveEditPlacement = async (placement, confirmedKeys = {}) => {
                                         </Column>
                                         <Column header="Actions" style="width: 6rem">
                                             <template #body="{ data }">
-                                                <div v-if="editingPlacementId === data.id" class="flex items-center gap-1">
-                                                    <Button
-                                                        icon="pi pi-check"
-                                                        severity="success"
-                                                        text
-                                                        rounded
-                                                        :loading="editSaving"
-                                                        @click="saveEditPlacement(data)"
-                                                    />
-                                                    <Button icon="pi pi-times" severity="secondary" text rounded :disabled="editSaving" @click="cancelEditPlacement" />
+                                                <div class="flex flex-col gap-2.5">
+                                                    <div v-for="schedule in data.schedules" :key="schedule.id">
+                                                        <div v-if="editingPlacementId === schedule.id" class="flex items-center gap-1">
+                                                            <Button
+                                                                icon="pi pi-check"
+                                                                severity="success"
+                                                                text
+                                                                rounded
+                                                                :loading="editSaving"
+                                                                @click="saveEditPlacement(scheduleEditTarget(data, schedule))"
+                                                            />
+                                                            <Button icon="pi pi-times" severity="secondary" text rounded :disabled="editSaving" @click="cancelEditPlacement" />
+                                                        </div>
+                                                        <Button
+                                                            v-else-if="canEdit"
+                                                            icon="pi pi-pencil"
+                                                            text
+                                                            rounded
+                                                            aria-label="Edit schedule"
+                                                            @click="startEditPlacement(scheduleEditTarget(data, schedule))"
+                                                        />
+                                                    </div>
                                                 </div>
-                                                <Button
-                                                    v-else-if="canEdit"
-                                                    icon="pi pi-pencil"
-                                                    text
-                                                    rounded
-                                                    aria-label="Edit schedule"
-                                                    @click="startEditPlacement(data)"
-                                                />
                                             </template>
                                         </Column>
                                     </DataTable>

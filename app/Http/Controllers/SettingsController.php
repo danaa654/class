@@ -55,6 +55,17 @@ class SettingsController extends Controller
         $user = $request->user();
         $role = $user->getRoleNames()->first();
         $isAdministrator = $role === 'Administrator';
+        // Registrar has the same read access as Administrator across
+        // the app except for Active Users/Sessions (see
+        // ActiveSessionController's doc comment) — Activity Log and
+        // the System/Maintenance summary are ordinary read-only audit
+        // info, not a "who's online right now" concern, so Registrar
+        // gets them too. Previously both were silently gated to
+        // Administrator only, which also meant a Registrar's "System"
+        // tab (already listed in $visibleGroups below) rendered with
+        // no data at all — this closes that gap rather than changing
+        // any write/action permission.
+        $canViewAuditData = $isAdministrator || $role === 'Registrar';
         $activeSchoolYear = SchoolYear::active();
 
         // Every role can see General + the read-only Academic Calendar
@@ -90,7 +101,7 @@ class SettingsController extends Controller
                 'lunch_start' => SchoolYear::LUNCH_BREAK_START,
                 'lunch_end' => SchoolYear::LUNCH_BREAK_END,
             ] : null,
-            'system' => $isAdministrator ? [
+            'system' => $canViewAuditData ? [
                 'app_version' => config('app.version', 'dev'),
                 'laravel_version' => app()->version(),
                 'database_status' => $this->databaseStatus(),
@@ -98,6 +109,11 @@ class SettingsController extends Controller
                     \App\Models\SystemSetting::query()->latest('updated_at')->first()
                 )->updated_at : null,
             ] : null,
+            // Active Sessions stays Administrator-only — this is the
+            // live "who's logged in right now" list (see
+            // ActiveSessionController's doc comment), which is a
+            // stricter/separate concern from the audit-trail data
+            // above and explicitly excluded from Registrar's access.
             'activeSessions' => $isAdministrator ? ActiveSessionController::activeSessions($request) : [],
             // Lazily evaluated — only actually queried when the
             // Activity Log tab is open (initial load, or a
@@ -107,7 +123,7 @@ class SettingsController extends Controller
             // pagination. (Inertia::optional() is this app's
             // inertiajs/inertia-laravel v3.2 name for what older
             // versions called Inertia::lazy() — same behavior.)
-            'activityLog' => $isAdministrator
+            'activityLog' => $canViewAuditData
                 ? Inertia::optional(fn () => ActivityLogController::activityLog($request))
                 : [],
         ]);

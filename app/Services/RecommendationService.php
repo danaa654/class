@@ -61,14 +61,29 @@ class RecommendationService
         $section = $sectionSubject->section;
 
         $faculty = $this->recommendFaculty($subject, $section, $sectionSubject);
-        $room = $this->recommendRooms($subject, $section, $sectionSubject);
+
+        // SPLIT-DELIVERY SCHEDULING — an Online row never occupies a
+        // Room (SectionSubject::requiresRoom() === false), so ranking
+        // Rooms for it is both meaningless AND actively harmful here:
+        // feeding a topRoomId into recommendTimes() below would check
+        // that (irrelevant) Room's conflicts too, potentially rejecting
+        // an otherwise perfectly free Faculty+Section slot just
+        // because SOME room happens to be booked then. Skip straight
+        // to a "no room needed" result and let the Time search below
+        // run on Faculty+Section conflicts only — exactly what an
+        // Online class actually needs to avoid.
+        $room = $sectionSubject->requiresRoom()
+            ? $this->recommendRooms($subject, $section, $sectionSubject)
+            : ['recommendations' => [], 'message' => 'This class meets online — no Room is needed.'];
 
         // The Time recommendation is checked against the *top* Faculty
         // and Room picks (falling back to whatever's already saved on
         // the row) so the suggested slot is actually usable with the
         // other two suggestions, not just theoretically open.
         $topFacultyId = $faculty['recommendations'][0]['id'] ?? $sectionSubject->faculty_id;
-        $topRoomId = $room['recommendations'][0]['id'] ?? $sectionSubject->room_id;
+        $topRoomId = $sectionSubject->requiresRoom()
+            ? ($room['recommendations'][0]['id'] ?? $sectionSubject->room_id)
+            : null;
 
         $time = $this->recommendTimes($subject, $section, $topFacultyId, $topRoomId, $sectionSubject);
 
@@ -77,7 +92,10 @@ class RecommendationService
         // — and therefore ScheduleConflictService — for every
         // Faculty/Room pairing, so a Combined Recommendation can never
         // disagree with the individual Faculty/Room/Time lists or with
-        // what happens when the Registrar actually saves.
+        // what happens when the Registrar actually saves. For an
+        // Online row (no Room list above), this naturally produces no
+        // Faculty x Room combinations — the frontend falls back to the
+        // plain Faculty/Time lists for it instead.
         $combined = $this->buildCombinedRecommendations(
             $subject, $section, $faculty['recommendations'], $room['recommendations'], $sectionSubject
         );
@@ -871,6 +889,28 @@ class RecommendationService
      * null for General Education subjects, which have no Major/College
      * of their own — College Matching simply doesn't apply to them.
      */
+    /**
+     * Weekly hours this specific row must fit, accounting for
+     * SPLIT-DELIVERY SCHEDULING — a split row (component !== 'combined')
+     * only needs to add up to ITS OWN split_hours share, not the
+     * Subject's full weekly total (e.g. the Face-to-Face half of a
+     * 5-hr Subject split into 4 F2F + 1 Online should size its
+     * sessions against 4, not 5). Same rule
+     * SectionSubjectController::update()'s "Weekly Hours Mismatch"
+     * check already applies when validating a manual save — kept here
+     * so every recommendation/scoring path in this service agrees
+     * with what that validation will accept, instead of Auto Generate
+     * or Suggest Available Time sizing a split row's session off the
+     * Subject's combined total and then never matching split_hours.
+     */
+    private function requiredHoursFor(Subject $subject, ?SectionSubject $current): int
+    {
+        $hours = $current?->split_hours
+            ?? ((int) $subject->lecture_hours + (int) $subject->laboratory_hours);
+
+        return $hours > 0 ? (int) $hours : 3;
+    }
+
     private function subjectCollegeId(Subject $subject): ?int
     {
         $subject->loadMissing('major.department');
@@ -1864,10 +1904,7 @@ class RecommendationService
         ?int $roomId,
         ?SectionSubject $current = null
     ): array {
-        $totalHours = (int) $subject->lecture_hours + (int) $subject->laboratory_hours;
-        if ($totalHours <= 0) {
-            $totalHours = 3;
-        }
+        $totalHours = $this->requiredHoursFor($subject, $current);
         $subjectHasLab = (int) $subject->laboratory_hours > 0;
 
         $excludingId = $current?->id ?? 0;
@@ -2027,10 +2064,7 @@ class RecommendationService
         ?int $sessionMinutes = null,
         array $excludeDays = []
     ): array {
-        $totalHours = (int) $subject->lecture_hours + (int) $subject->laboratory_hours;
-        if ($totalHours <= 0) {
-            $totalHours = 3;
-        }
+        $totalHours = $this->requiredHoursFor($subject, $current);
         $subjectHasLab = (int) $subject->laboratory_hours > 0;
 
         $excludingId = $current?->id ?? 0;
@@ -2468,10 +2502,7 @@ class RecommendationService
         $expectedMeetings = $this->meetingPatternService->meetingsPerWeek($subject);
         $fitsPattern = count($days) === $expectedMeetings;
 
-        $totalHours = (int) $subject->lecture_hours + (int) $subject->laboratory_hours;
-        if ($totalHours <= 0) {
-            $totalHours = 3;
-        }
+        $totalHours = $this->requiredHoursFor($subject, $current);
         $expectedMinutes = (int) round(($totalHours / max(count($days), 1)) * 60);
         $actualMinutes = $this->minutesBetween($startTime, $endTime);
         $fitsHours = $actualMinutes >= $expectedMinutes - 5; // small tolerance for rounding

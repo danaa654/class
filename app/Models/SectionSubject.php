@@ -16,6 +16,18 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * A newly-added subject always starts with every schedule field
  * empty and Status = 'Draft'. Faculty/Room/Time are never assigned
  * automatically — that happens later, in the scheduling engine.
+ *
+ * SPLIT-DELIVERY SCHEDULING: a Subject normally occupies exactly one
+ * row here (`component` = 'combined', `delivery_mode` =
+ * 'face_to_face' — identical to how every row behaved before this
+ * feature existed). A Registrar may instead split a Subject's
+ * required weekly hours into two rows — one 'lecture' + one
+ * 'laboratory' component — each with its own `delivery_mode` and
+ * `split_hours` share of the total. See
+ * StoreSectionSubjectSplitRequest for the validation that keeps the
+ * two rows' split_hours summing to the Subject's total, and
+ * requiresRoom() below for how downstream conflict/schedule logic
+ * should treat each row.
  */
 class SectionSubject extends Model
 {
@@ -29,6 +41,9 @@ class SectionSubject extends Model
     protected $fillable = [
         'section_id',
         'subject_id',
+        'component',
+        'delivery_mode',
+        'split_hours',
         'source',
         'capacity',
         'capacity_confirmed',
@@ -59,6 +74,7 @@ class SectionSubject extends Model
     protected function casts(): array
     {
         return [
+            'split_hours' => 'integer',
             'capacity' => 'integer',
             'capacity_confirmed' => 'boolean',
             'hours_confirmed' => 'boolean',
@@ -184,6 +200,42 @@ class SectionSubject extends Model
     public function mergedPlacements(): \Illuminate\Database\Eloquent\Relations\HasMany
     {
         return $this->hasMany(SectionSubject::class, 'merged_into_section_subject_id');
+    }
+
+    /**
+     * True if this row is a split-delivery component (created by the
+     * F2F/Online split flow) rather than the default single-row
+     * placement every subject starts with. Sibling rows share the
+     * same section_id + subject_id but a different `component`.
+     */
+    public function isSplitComponent(): bool
+    {
+        return $this->component !== 'combined';
+    }
+
+    /**
+     * ROOM REQUIREMENT — the single source of truth every downstream
+     * consumer (ScheduleConflictService's Room conflict check,
+     * AutoScheduleService's room-assignment step, the manual
+     * spreadsheet editor's Room column) should call instead of
+     * re-deriving "does this row need a Room" on its own.
+     *
+     * False for:
+     *   - a Practicum/OJT subject's row (existing rule, unchanged —
+     *     see Subject::isPracticum()), or
+     *   - an 'online' delivery_mode row (new — the split-delivery
+     *     Lecture-Online half of a subject like CAP102).
+     *
+     * True otherwise, including every ordinary 'combined'/
+     * 'face_to_face' row exactly as today.
+     */
+    public function requiresRoom(): bool
+    {
+        if ($this->subject?->isPracticum()) {
+            return false;
+        }
+
+        return $this->delivery_mode !== 'online';
     }
 
     /**

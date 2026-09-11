@@ -30,6 +30,7 @@ import TimeRecommendationSelector from '@/Components/Scheduling/TimeRecommendati
 import { dockedEditSectionSubjectId } from '@/composables/useTimeEditDock';
 import MergeRecommendationModal from '@/Components/Scheduling/MergeRecommendationModal.vue';
 import RoomGrid from '@/Components/Scheduling/RoomGrid.vue';
+import SectionGrid from '@/Components/Scheduling/SectionGrid.vue';
 import InfoPopover from '@/Components/InfoPopover.vue';
 import { useTheme } from '@/composables/useTheme';
 import { useSchedulePolling } from '@/composables/useSchedulePolling';
@@ -650,6 +651,18 @@ const endTimeOptionsFor = (row) => {
 /* Time by hand afterward.                                               */
 
 const weeklyContactHours = (row) => {
+    // SPLIT-DELIVERY SCHEDULING — a split row (component !== 'combined')
+    // only covers its own split_hours share of the subject's total,
+    // not the whole subject. Using the full lecture+laboratory total
+    // here would compute e.g. a 4-hour End Time for a row the
+    // Registrar explicitly split down to 1 Online hour. An ordinary,
+    // never-split 'combined' row is unaffected — split_hours is null
+    // for it, so this falls through to the subject total exactly as
+    // before.
+    if (row.split_hours != null) {
+        return Number(row.split_hours);
+    }
+
     const lecture = Number(row.subject?.lecture_hours ?? 0);
     const laboratory = Number(row.subject?.laboratory_hours ?? 0);
     return lecture + laboratory;
@@ -1375,12 +1388,32 @@ watch(
 // local unsaved edits (dirty rows, or the Auto Schedule review panel
 // still open), confirm first so nothing is silently discarded.
 const refreshingSchedule = ref(false);
-const refreshSchedule = () => {
+// PERFORMANCE — the props a Split/Undo Split actually changes. Passed
+// to refreshSchedule({ only: SPLIT_REFRESH_PROPS }) below so that
+// request skips activeRooms/curriculums/availableSubjects/activeMajors
+// entirely rather than just trimming them from the response — see
+// refreshSchedule()'s docblock.
+const SPLIT_REFRESH_PROPS = ['sectionSubjects', 'scheduleVersion', 'siblingSections', 'activeFaculty', 'filters'];
+
+const refreshSchedule = (options = {}) => {
     const hasUnsavedWork = dirtyRowIds.value.size > 0 || autoSummaryVisible.value;
 
     const doRefresh = () => {
         refreshingSchedule.value = true;
         router.reload({
+            // PERFORMANCE — `only` is set for the Split/Undo Split
+            // callers below (partialProps), never for the manual
+            // Refresh button, which is meant to pull in everything —
+            // including activeRooms/curriculums/availableSubjects/
+            // activeMajors, in case another user changed one of those
+            // in the meantime. Those props are wrapped server-side in
+            // a plain PHP closure (see SectionSubjectController::show())
+            // that is simply never invoked when its name isn't in
+            // `only` — so a Split/Undo Split refresh isn't just a
+            // smaller response, it skips those queries entirely, which
+            // is most of why a refresh used to feel slow right after
+            // clicking Split Hours.
+            ...(options.only ? { only: options.only } : {}),
             onFinish: () => {
                 refreshingSchedule.value = false;
                 dirtyRowIds.value = new Set();
@@ -1501,6 +1534,21 @@ const onFacultyChange = (row, value) => {
     // qualified/from-college, so it must be re-evaluated fresh.
     stateFor(row.id).facultyMismatchConfirmed = false;
     fetchBusyTimes(row);
+
+    // SPLIT-DELIVERY SCHEDULING — SAME-FACULTY RULE. A subject split
+    // into Face-to-Face + Online halves is still taught by one
+    // faculty member — keep the sibling row's Faculty in sync
+    // whenever either one changes, rather than letting them drift
+    // apart into two different faculty members for the same subject.
+    if (isSplitRow(row)) {
+        const sibling = rows.value.find((r) => r.subject_id === row.subject_id && r.id !== row.id);
+        if (sibling && sibling.faculty_id !== value) {
+            sibling.faculty_id = value;
+            markDirty(sibling, 'faculty_id');
+            stateFor(sibling.id).workloadConfirmed = false;
+            stateFor(sibling.id).facultyMismatchConfirmed = false;
+        }
+    }
 };
 const onRoomChange = (row, value) => {
     if (value === '__loading__') return;
@@ -1809,13 +1857,20 @@ const validateRowsClientSide = () => {
 
         // A schedule slot must be fully filled in, or fully empty — no
         // half-assigned rows (e.g. Faculty picked but no Room/Days/Time).
-        const filledCount = [row.faculty_id, row.room_id, row.days?.length > 0, row.start_time, row.end_time].filter(
-            Boolean,
-        ).length;
+        // SPLIT-DELIVERY SCHEDULING — an 'online' row is exempt from the
+        // Room requirement (see SectionSubject::requiresRoom()), so Room
+        // is left out of both the required-field list and the count for
+        // that row only. An ordinary row is unaffected.
+        const requiresRoom = row.delivery_mode !== 'online';
+        const requiredValues = requiresRoom
+            ? [row.faculty_id, row.room_id, row.days?.length > 0, row.start_time, row.end_time]
+            : [row.faculty_id, row.days?.length > 0, row.start_time, row.end_time];
 
-        if (filledCount > 0 && filledCount < 5) {
+        const filledCount = requiredValues.filter(Boolean).length;
+
+        if (filledCount > 0 && filledCount < requiredValues.length) {
             if (!row.faculty_id) state.errors.faculty_id = 'Required to complete this schedule.';
-            if (!row.room_id) state.errors.room_id = 'Required to complete this schedule.';
+            if (requiresRoom && !row.room_id) state.errors.room_id = 'Required to complete this schedule.';
             if (!row.days || row.days.length === 0) state.errors.days = 'Required to complete this schedule.';
             if (!row.start_time) state.errors.start_time = 'Required to complete this schedule.';
             if (!row.end_time) state.errors.end_time = 'Required to complete this schedule.';
@@ -3128,6 +3183,120 @@ const onAddManual = () => {
 /* Remove Subject                                                      */
 /* ------------------------------------------------------------------ */
 
+// SPLIT-DELIVERY SCHEDULING — "Split Hours" modal state. Splits one
+// 'combined' row into a Face-to-Face row + an Online row (see
+// SectionSubjectController::splitSchedule()), or undoes an existing
+// split back into one row (unsplitSchedule()). Guardrail (only
+// Lecture hours may go Online) is enforced server-side by
+// StoreSectionSubjectSplitRequest — the client just shows the max.
+const splitModalVisible = ref(false);
+const splitModalRow = ref(null);
+const splitSaving = ref(false);
+const splitErrors = ref({});
+const splitForm = reactive({ f2f_hours: 0, online_hours: 0 });
+
+const splitTotalHours = computed(() => {
+    const subject = splitModalRow.value?.subject;
+    return subject ? (Number(subject.lecture_hours) || 0) + (Number(subject.laboratory_hours) || 0) : 0;
+});
+
+const splitMaxOnlineHours = computed(() => Number(splitModalRow.value?.subject?.lecture_hours) || 0);
+
+// A row is "split" if a sibling SectionSubject row exists for the
+// same subject_id within this section — i.e. rows.value has more
+// than one entry sharing this row's subject_id.
+const isSplitRow = (row) => rows.value.filter((r) => r.subject_id === row.subject_id).length > 1;
+
+// COMPACT SPLIT-PAIR DISPLAY — the F2F and Online halves of a split
+// subject share the same section_id + subject_id (see isSplitRow
+// above). Rather than repeating the full EDP/Subject/Category/Units/
+// Status/Source header on both halves, only the FIRST row for a given
+// subject_id renders that full header; the second (and any later)
+// row renders a slim continuation header instead — see the "Line 1"
+// v-if/v-else in the template. Each half still keeps its own
+// independent Faculty/Room/Days/Start/End Time fields underneath
+// (they can genuinely differ — different faculty or times per
+// component — this only removes the duplicated header/metadata, not
+// the editable fields themselves).
+const isSplitContinuation = (row) => {
+    if (!isSplitRow(row)) return false;
+    const firstIndex = rows.value.findIndex((r) => r.subject_id === row.subject_id);
+    const ownIndex = rows.value.findIndex((r) => r.id === row.id);
+    return firstIndex !== -1 && ownIndex !== firstIndex;
+};
+
+const openSplitModal = (row) => {
+    splitModalRow.value = row;
+    splitErrors.value = {};
+    const total = (Number(row.subject?.lecture_hours) || 0) + (Number(row.subject?.laboratory_hours) || 0);
+    splitForm.online_hours = Math.min(1, Number(row.subject?.lecture_hours) || 0);
+    splitForm.f2f_hours = total - splitForm.online_hours;
+    splitModalVisible.value = true;
+};
+
+const closeSplitModal = () => {
+    splitModalVisible.value = false;
+    splitModalRow.value = null;
+};
+
+const submitSplit = async () => {
+    if (!splitModalRow.value) return;
+
+    splitSaving.value = true;
+    splitErrors.value = {};
+
+    try {
+        const response = await window.axios.post(
+            route('scheduling.section-subjects.split', [props.section.id, splitModalRow.value.id]),
+            {
+                f2f_hours: Number(splitForm.f2f_hours),
+                online_hours: Number(splitForm.online_hours),
+            },
+        );
+
+        // Use the server's message rather than a hardcoded one — it
+        // also reports how many sibling sections (same Major/Term)
+        // got the same split automatically. See
+        // SectionSubjectController::splitSchedule()'s docblock.
+        toast.add({ severity: 'success', summary: 'Split saved', detail: response.data?.message ?? 'Subject split into Face-to-Face and Online schedules.', life: 4500 });
+        closeSplitModal();
+        refreshSchedule({ only: SPLIT_REFRESH_PROPS });
+    } catch (error) {
+        if (error.response?.status === 422) {
+            splitErrors.value = Object.fromEntries(
+                Object.entries(error.response.data.errors ?? {}).map(([key, messages]) => [key, messages[0]]),
+            );
+        } else {
+            toast.add({ severity: 'error', summary: 'Split failed', detail: 'Something went wrong saving the split. Please try again.', life: 4000 });
+        }
+    } finally {
+        splitSaving.value = false;
+    }
+};
+
+const undoSplit = (row) => {
+    Swal.fire({
+        title: 'Undo this split?',
+        text: `${row.subject?.subject_code} will be merged back into a single Face-to-Face schedule. Any separate Faculty/Room/Time set on the Online half will be discarded.`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#DC2626',
+        cancelButtonColor: '#64748B',
+        confirmButtonText: 'Yes, undo split',
+    }).then((result) => {
+        if (!result.isConfirmed) return;
+
+        window.axios.post(route('scheduling.section-subjects.unsplit', [props.section.id, row.id]))
+            .then(() => {
+                toast.add({ severity: 'info', summary: 'Split undone', detail: 'Subject merged back into a single schedule.', life: 3500 });
+                refreshSchedule({ only: SPLIT_REFRESH_PROPS });
+            })
+            .catch(() => {
+                toast.add({ severity: 'error', summary: 'Undo failed', detail: 'Something went wrong undoing the split. Please try again.', life: 4000 });
+            });
+    });
+};
+
 const onRemove = (row) => {
     Swal.fire({
         title: 'Remove this subject?',
@@ -3464,6 +3633,14 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                 >
                     Room Grid
                 </button>
+                <button
+                    type="button"
+                    class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
+                    :class="pageTab === 'section-grid' ? 'border-blue-500 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'"
+                    @click="pageTab = 'section-grid'"
+                >
+                    Section Grid
+                </button>
                 <InfoPopover
                     title="Room Grid"
                     :paragraphs="['Displays room usage by day and time for this section\'s scheduled subjects.']"
@@ -3491,8 +3668,31 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                         :hard-cap-units="hardCapUnits"
                         :is-stale="schedulePolling.isStale.value"
                         :expected-schedule-version="schedulePolling.currentVersion.value"
+                        :is-dark="isDark"
                         @row-updated="onRoomGridRowUpdated"
                         @schedule-stale="onScheduleStaleFromRoomGrid"
+                    />
+                </template>
+            </Card>
+            </div>
+
+            <!-- Section Grid tab — weekly Day x Time view scoped to THIS
+                 section only (as opposed to Room Grid's Room x Time view
+                 spanning every section sharing a Room). Built so Online
+                 rows, which have no Room to sit on in Room Grid, have a
+                 place to be visually placed and assigned. -->
+            <div v-show="pageTab === 'section-grid'" class="neu-card rounded-2xl transition-colors duration-300">
+            <Card
+                class="!rounded-2xl !bg-transparent !border-0 !shadow-none"
+                :pt="{ body: { class: '!bg-transparent' } }"
+            >
+                <template #content>
+                    <SectionGrid
+                        :section="section"
+                        :rows="rows"
+                        :scheduling-window="schedulingWindow"
+                        :is-dark="isDark"
+                        @row-updated="onRoomGridRowUpdated"
                     />
                 </template>
             </Card>
@@ -3505,7 +3705,7 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                 :pt="{ body: { class: '!bg-transparent' } }"
             >
                 <template #content>
-                    <Toolbar class="!bg-transparent !border-0 !px-0 !pt-0 !pb-4 flex-wrap gap-3 neu-form">
+                    <Toolbar class="!bg-transparent !border-0 !px-0 !pt-0 !pb-2.5 flex-wrap gap-3 neu-form">
                         <template #start>
                             <span class="relative w-full sm:w-80">
                                 <i class="pi pi-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm"></i>
@@ -3548,14 +3748,19 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                         class="neu-inset neu-table rounded-xl overflow-hidden schedule-table"
                         :class="isDark ? 'neu-table-dark' : ''"
                         :rowClass="
-                            (row) =>
+                            (row) => [
                                 rowIsInConflict(row)
                                     ? '!bg-red-50 conflict-row-clickable row-light-bg'
                                     : rowHasCapacityWarning(row.id)
                                       ? '!bg-amber-50 row-light-bg'
                                       : dirtyRowIds.has(row.id)
                                         ? '!bg-amber-50 row-light-bg'
-                                        : undefined
+                                        : undefined,
+                                // Visually attaches the second half of a split
+                                // subject to the first half's card — see
+                                // isSplitContinuation()'s docblock.
+                                isSplitContinuation(row) ? 'split-pair-second' : undefined,
+                            ]
                         "
                         @row-click="onRowClick"
                         stripedRows
@@ -3585,35 +3790,38 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                         <Column style="width: 100%">
                             <template #body="{ data }">
                                 <div
-                                    class="flex flex-col gap-2.5 py-1.5 px-3 -mx-3 rounded-lg transition-colors"
+                                    class="flex flex-col gap-1.5 py-1 px-2.5 -mx-2.5 rounded-lg transition-colors"
                                     :class="{ 'unscheduled-row': rowIsUnscheduled(data) }"
                                 >
                                     <!-- Line 1: EDP Code / Subject Code / Subject Title / Category / Units / Status / Source / Actions -->
-                                    <div class="flex flex-wrap items-center gap-x-5 gap-y-1.5">
-                                        <div class="min-w-[7rem]">
+                                    <!-- Hidden for the second half of a split subject — see
+                                         isSplitContinuation()'s docblock — which gets the slim
+                                         "Line 1 (compact)" header below instead. -->
+                                    <div v-if="!isSplitContinuation(data)" class="flex flex-wrap items-center gap-x-4 gap-y-1">
+                                        <div class="min-w-[6rem]">
                                             <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">EDP Code</p>
                                             <span v-if="data.edp_code" class="font-mono text-xs font-semibold text-indigo-700">
                                                 {{ data.edp_code }}
                                             </span>
                                             <Tag v-else value="Pending" severity="secondary" class="!text-[0.65rem]" />
                                         </div>
-                                        <div class="min-w-[7rem]">
+                                        <div class="min-w-[6rem]">
                                             <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Subject Code</p>
                                             <span class="text-xs font-medium text-slate-700">{{ data.subject?.subject_code }}</span>
                                         </div>
-                                        <div class="min-w-[12rem] flex-1">
+                                        <div class="min-w-[10rem] max-w-[16rem]">
                                             <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Subject Title</p>
                                             <span class="text-xs text-slate-700">{{ data.subject?.subject_title }}</span>
                                         </div>
-                                        <div class="min-w-[7rem]">
+                                        <div class="min-w-[6rem]">
                                             <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Category</p>
                                             <Tag :value="data.subject?.category" :severity="categorySeverity(data.subject?.category)" class="!text-[0.65rem]" />
                                         </div>
-                                        <div class="w-10">
+                                        <div class="w-9">
                                             <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Units</p>
                                             <span class="text-xs text-slate-700">{{ data.subject?.units }}</span>
                                         </div>
-                                        <div class="min-w-[8rem]">
+                                        <div class="min-w-[7rem]">
                                             <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Status</p>
                                             <div class="flex items-center gap-1 flex-wrap">
                                                 <Tag :value="displayStatus(data)" :severity="statusSeverity(displayStatus(data))" class="!text-[0.65rem]" />
@@ -3656,6 +3864,17 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                             <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Source</p>
                                             <Tag :value="data.source" :severity="sourceSeverity(data.source)" class="!text-[0.65rem]" />
                                         </div>
+                                        <!-- SPLIT-DELIVERY SCHEDULING — labels which half of a split
+                                             subject this row is. Hidden for ordinary 'combined' rows
+                                             so nothing changes for subjects that were never split. -->
+                                        <div v-if="isSplitRow(data)" class="min-w-[6rem]">
+                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Delivery</p>
+                                            <Tag
+                                                :value="data.delivery_mode === 'online' ? `🌐 Online (${data.split_hours}h)` : `🏫 Face-to-Face (${data.split_hours}h)`"
+                                                :severity="data.delivery_mode === 'online' ? 'info' : 'success'"
+                                                class="!text-[0.65rem]"
+                                            />
+                                        </div>
                                         <!-- INTELLIGENT IRREGULAR SECTION SCHEDULING — a merged row
                                              rides along on a Regular section's existing class
                                              (see mergeExclusionIds()/IrregularSectionMergeService);
@@ -3673,7 +3892,93 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                                 class="!text-[0.65rem]"
                                             />
                                         </div>
+                                        <!-- SIBLING SECTION PATTERN note — mirrors RoomGrid's own
+                                             prefill hint (see computeAutoEndTime/siblingPatternHoursFor
+                                             above). Shown once per subject on this shared Line 1
+                                             (not per split half) since it describes the whole
+                                             subject's schedule, not one delivery mode's End Time. -->
+                                        <div
+                                            v-if="siblingPatternHoursFor(data) && data.end_time === computeAutoEndTime(data)"
+                                            class="min-w-[8rem] text-[11px] text-teal-600"
+                                        >
+                                            <i class="pi pi-copy"></i>
+                                            Matches {{ recommendations[data.id]?.combined?.recommendations?.[0]?.pattern_source?.donor_section_code }}'s schedule.
+                                        </div>
                                         <div class="ml-auto flex items-center gap-1 self-end">
+                                            <Button
+                                                v-if="!isSplitRow(data)"
+                                                icon="pi pi-arrows-h"
+                                                label="Split Hours"
+                                                text
+                                                size="small"
+                                                class="!text-xs"
+                                                aria-label="Split into Face-to-Face and Online schedules"
+                                                title="Split this subject's hours between Face-to-Face and Online schedules"
+                                                :disabled="isSectionFinalized"
+                                                @click="openSplitModal(data)"
+                                            />
+                                            <Button
+                                                v-else
+                                                icon="pi pi-arrows-h"
+                                                label="Undo Split"
+                                                text
+                                                size="small"
+                                                severity="warn"
+                                                class="!text-xs"
+                                                aria-label="Undo the Face-to-Face/Online split"
+                                                :disabled="isSectionFinalized"
+                                                @click="undoSplit(data)"
+                                            />
+                                            <Button
+                                                icon="pi pi-sparkles"
+                                                label="Recommend"
+                                                text
+                                                size="small"
+                                                class="!text-xs"
+                                                aria-label="Smart Schedule Recommendation"
+                                                :disabled="isSectionFinalized"
+                                                @click="openRecommendDrawer(data)"
+                                            />
+                                            <Button
+                                                icon="pi pi-trash"
+                                                text
+                                                rounded
+                                                severity="danger"
+                                                size="small"
+                                                aria-label="Remove"
+                                                :disabled="isSectionFinalized"
+                                                :title="isSectionFinalized ? 'This section is finalized and locked.' : null"
+                                                @click="onRemove(data)"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <!-- Line 1 (compact) — the second half of a split subject.
+                                         Skips the repeated EDP/Subject/Category/Units/Source
+                                         metadata (already shown on the first half directly
+                                         above) and keeps just the Delivery tag, Status, and the
+                                         per-row actions this half still needs of its own. -->
+                                    <div v-else class="flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-2 border-l-2 border-slate-200">
+                                        <Tag
+                                            :value="data.delivery_mode === 'online' ? `🌐 Online (${data.split_hours}h)` : `🏫 Face-to-Face (${data.split_hours}h)`"
+                                            :severity="data.delivery_mode === 'online' ? 'info' : 'success'"
+                                            class="!text-[0.65rem]"
+                                        />
+                                        <Tag :value="displayStatus(data)" :severity="statusSeverity(displayStatus(data))" class="!text-[0.65rem]" />
+                                        <i
+                                            v-if="rowIsInConflict(data) || rowHasCapacityWarning(data.id) || rowHasRoomTypeWarning(data.id) || rowHasFacultyMismatchWarning(data.id)"
+                                            class="pi pi-exclamation-triangle"
+                                            :class="rowIsInConflict(data) ? 'text-red-500' : 'text-amber-500'"
+                                            :title="rowIsInConflict(data) ? (conflictTooltip(data.id) || 'Conflict — click the row to find the best schedule') : (conflictTooltip(data.id) || 'Unresolved scheduling conflict')"
+                                        ></i>
+                                        <span
+                                            v-if="rowIsInConflict(data)"
+                                            class="text-[0.65rem] text-red-500 underline decoration-dotted cursor-pointer"
+                                            @click.stop="openRecommendDrawer(data)"
+                                        >
+                                            Click to find best schedule
+                                        </span>
+                                        <div class="ml-auto flex items-center gap-1">
                                             <Button
                                                 icon="pi pi-sparkles"
                                                 label="Recommend"
@@ -3699,10 +4004,10 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                     </div>
 
                                     <!-- Line 2: Faculty / Room / Days / Start Time / End Time -->
-                                    <div class="flex flex-wrap items-start gap-3 pt-2 border-t border-slate-100">
+                                    <div class="flex flex-wrap items-start gap-2 pt-1.5 border-t border-slate-100">
                                         <!-- Faculty -->
-                                        <div class="flex-1 min-w-[15rem]">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400 mb-1">Faculty</p>
+                                        <div class="flex-1 min-w-[13rem]">
+                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400 mb-0.5">Faculty</p>
                                             <div class="flex items-start gap-1" @mouseenter="fetchRecommendations(data)">
                                                 <Select
                                                     v-model="data.faculty_id"
@@ -3770,9 +4075,17 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                         </div>
 
                                         <!-- Room -->
-                                        <div class="flex-1 min-w-[14rem]">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400 mb-1">Room</p>
-                                            <div class="flex items-start gap-1" @mouseenter="fetchRecommendations(data)">
+                                        <div class="flex-1 min-w-[12rem]">
+                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400 mb-0.5">Room</p>
+                                            <!-- SPLIT-DELIVERY SCHEDULING — an 'online' delivery_mode
+                                                 row never gets a Room and never should (see
+                                                 SectionSubject::requiresRoom()); show a plain label
+                                                 instead of the Room dropdown, same treatment
+                                                 Practicum/OJT rows already get. -->
+                                            <div v-if="data.delivery_mode === 'online'" class="flex items-center gap-1 h-[2.5rem]">
+                                                <Tag value="🌐 Online — no room needed" severity="info" class="!text-[0.65rem]" />
+                                            </div>
+                                            <div v-else class="flex items-start gap-1" @mouseenter="fetchRecommendations(data)">
                                                 <Select
                                                     v-model="data.room_id"
                                                     :options="roomGroupsFor(data)"
@@ -3831,8 +4144,8 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                         </div>
 
                                         <!-- Days -->
-                                        <div class="w-28 shrink-0">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400 mb-1">Days</p>
+                                        <div class="w-24 shrink-0">
+                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400 mb-0.5">Days</p>
                                             <div class="flex items-start gap-1">
                                                 <MultiSelect
                                                     v-model="data.days"
@@ -3878,8 +4191,8 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                         </div>
 
                                         <!-- Start Time -->
-                                        <div class="w-44 shrink-0">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400 mb-1">Start Time</p>
+                                        <div class="w-36 shrink-0">
+                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400 mb-0.5">Start Time</p>
                                             <Select
                                                 :modelValue="data.start_time"
                                                 :options="timeOptionsFor(data)"
@@ -3906,8 +4219,8 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                         </div>
 
                                         <!-- End Time -->
-                                        <div class="w-44 shrink-0">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400 mb-1">End Time</p>
+                                        <div class="w-36 shrink-0">
+                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400 mb-0.5">End Time</p>
                                             <Select
                                                 :modelValue="data.end_time"
                                                 :options="endTimeOptionsFor(data)"
@@ -3930,18 +4243,6 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                             </Select>
                                             <p v-if="stateFor(data.id).errors.end_time" class="text-red-500 text-xs mt-1">
                                                 <i class="pi pi-exclamation-triangle mr-1"></i>{{ stateFor(data.id).errors.end_time }}
-                                            </p>
-                                            <!-- SIBLING SECTION PATTERN note — mirrors RoomGrid's own
-                                                 prefill hint (see computeAutoEndTime/siblingPatternHoursFor
-                                                 above). Only shown while End Time still equals the
-                                                 auto-filled sibling-derived value; editing it by hand
-                                                 hides this automatically since the values diverge. -->
-                                            <p
-                                                v-else-if="siblingPatternHoursFor(data) && data.end_time === computeAutoEndTime(data)"
-                                                class="text-[11px] text-teal-600 mt-1"
-                                            >
-                                                <i class="pi pi-copy"></i>
-                                                Matches {{ recommendations[data.id]?.combined?.recommendations?.[0]?.pattern_source?.donor_section_code }}'s schedule.
                                             </p>
                                         </div>
                                     </div>
@@ -4850,6 +5151,61 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
             @choose-candidate="chooseMergeCandidate"
             @choose-independent="chooseIndependentSchedule"
         />
+
+        <!-- SPLIT-DELIVERY SCHEDULING — Split Hours modal -->
+        <Dialog
+            v-model:visible="splitModalVisible"
+            modal
+            header="Split Hours — Face-to-Face / Online"
+            :style="{ width: '28rem' }"
+            :pt="{ root: { class: isDark ? 'dark-scope' : '' } }"
+        >
+            <p class="text-sm text-slate-500 mb-4">
+                <strong>{{ splitModalRow?.subject?.subject_code }}</strong> — {{ splitModalRow?.subject?.subject_title }}
+                requires <strong>{{ splitTotalHours }} hr(s)</strong> per week. Only Lecture hours may be scheduled Online
+                (max {{ splitMaxOnlineHours }} hr(s)) — Laboratory hours always stay Face-to-Face.
+            </p>
+
+            <div class="flex flex-col gap-4">
+                <div>
+                    <label class="text-xs uppercase tracking-wide text-slate-400 mb-1 block">Face-to-Face hours (needs a Room)</label>
+                    <InputText
+                        v-model.number="splitForm.f2f_hours"
+                        type="number"
+                        min="0"
+                        class="w-full"
+                        :class="{ 'p-invalid': splitErrors.f2f_hours }"
+                    />
+                    <p v-if="splitErrors.f2f_hours" class="text-red-500 text-xs mt-1">
+                        <i class="pi pi-exclamation-triangle mr-1"></i>{{ splitErrors.f2f_hours }}
+                    </p>
+                </div>
+
+                <div>
+                    <label class="text-xs uppercase tracking-wide text-slate-400 mb-1 block">Online hours (no Room)</label>
+                    <InputText
+                        v-model.number="splitForm.online_hours"
+                        type="number"
+                        min="1"
+                        :max="splitMaxOnlineHours"
+                        class="w-full"
+                        :class="{ 'p-invalid': splitErrors.online_hours }"
+                    />
+                    <p v-if="splitErrors.online_hours" class="text-red-500 text-xs mt-1">
+                        <i class="pi pi-exclamation-triangle mr-1"></i>{{ splitErrors.online_hours }}
+                    </p>
+                </div>
+
+                <p class="text-xs text-slate-400">
+                    Total entered: {{ Number(splitForm.f2f_hours || 0) + Number(splitForm.online_hours || 0) }} / {{ splitTotalHours }} hr(s) required
+                </p>
+            </div>
+
+            <template #footer>
+                <Button label="Cancel" text @click="closeSplitModal" :disabled="splitSaving" />
+                <Button label="Save Split" icon="pi pi-check" :loading="splitSaving" @click="submitSplit" />
+            </template>
+        </Dialog>
     </AppLayout>
 </template>
 
@@ -4859,6 +5215,22 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
    button row reads as one cohesive, more modern group. */
 .section-actions :deep(.p-button) {
     border-radius: 9999px !important;
+}
+
+/* Split-pair second row — visually attaches the Online/F2F second
+   half directly under its sibling's card (see isSplitContinuation())
+   by removing the normal row gap/stripe/border between them, so the
+   pair reads as one merged card instead of two separate rows. */
+.schedule-table :deep(tr.split-pair-second) {
+    background-color: transparent !important;
+}
+.schedule-table :deep(tr.split-pair-second > td) {
+    padding-top: 0 !important;
+    border-top: none !important;
+}
+.schedule-table :deep(tr.split-pair-second .flex-col) {
+    padding-top: 0 !important;
+    margin-top: -0.75rem;
 }
 
 /* Conflicted rows (red) are click-to-resolve — opens the Smart
@@ -4899,18 +5271,18 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
 /* Slightly tighter row height/padding + smaller base font so more of
    the table is visible at once and it's easier to scan/read. */
 .schedule-table :deep(.p-datatable-thead > tr > th) {
-    padding: 0.6rem 0.75rem;
+    padding: 0.4rem 0.6rem;
     font-size: 0.8rem;
 }
 .schedule-table :deep(.p-datatable-tbody > tr > td) {
-    padding: 0.5rem 0.75rem;
+    padding: 0.35rem 0.6rem;
     font-size: 0.8rem;
 }
 .schedule-table :deep(.p-select-label),
 .schedule-table :deep(.p-multiselect-label),
 .schedule-table :deep(.p-inputtext) {
-    padding-top: 0.4rem;
-    padding-bottom: 0.4rem;
+    padding-top: 0.3rem;
+    padding-bottom: 0.3rem;
 }
 
 /* Dark-mode overrides. Wrapping the page body in the "dark-scope" class

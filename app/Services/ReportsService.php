@@ -251,20 +251,71 @@ class ReportsService
 
     private function scheduleBySection(array $filters): array
     {
-        $rows = $this->sectionSubjectsQuery($filters)->get()->map(fn (SectionSubject $ss) => [
-            'EDP Code' => $ss->edp_code,
-            'Section' => $ss->section?->section_code,
-            'Subject Code' => $ss->subject?->subject_code,
-            'Subject' => $ss->subject?->subject_title,
-            'Faculty' => $ss->faculty?->full_name,
-            'Room' => $ss->room?->room_code,
-            'Day' => $ss->days,
-            'Start' => $this->formatTime12h($ss->start_time),
-            'End' => $this->formatTime12h($ss->end_time),
-            'Type' => $ss->section?->section_type,
-        ]);
+        // SPLIT-DELIVERY / MULTI-SESSION SCHEDULING — same "one class,
+        // one row" rule scheduleByFaculty() already applies: a
+        // Face-to-Face/Online split (or a Lecture/Lab pair) is ONE
+        // subject offering in this section, sharing one EDP Code, just
+        // with more than one Schedule/Room line. Without this, the
+        // same EDP Code printed twice on the Study Load report (once
+        // per component) even after the EDP Code itself was fixed to
+        // be shared — this groups those rows back into one before the
+        // print view ever sees them.
+        $sectionSubjects = $this->sectionSubjectsQuery($filters)->get();
+
+        $rows = $sectionSubjects
+            ->groupBy(fn (SectionSubject $ss) => $ss->section_id.'-'.$ss->subject_id)
+            ->map(function ($group) {
+                // The Face-to-Face half (or the only row, for a class
+                // that was never split) is the group's "primary" row —
+                // its EDP Code/Faculty/Section Type identify the whole
+                // group, same convention as scheduleByFaculty()'s
+                // primary row.
+                $primary = $group->first(fn (SectionSubject $ss) => $ss->delivery_mode !== 'online') ?? $group->first();
+
+                // One entry per Schedule line in the group — a
+                // never-split class has exactly one; a split class has
+                // two (Face-to-Face, then Online), rendered as two
+                // Room/Day-Time lines under the SAME EDP Code row
+                // instead of two separate rows.
+                $schedules = $group
+                    ->sortBy(fn (SectionSubject $ss) => $ss->delivery_mode === 'online' ? 1 : 0)
+                    ->map(fn (SectionSubject $ss) => [
+                        'Room' => $ss->delivery_mode === 'online' ? 'Online' : $ss->room?->room_code,
+                        'Day' => $ss->days,
+                        'Start' => $this->formatTime12h($ss->start_time),
+                        'End' => $this->formatTime12h($ss->end_time),
+                    ])
+                    ->values();
+
+                $first = $schedules->first() ?? ['Room' => null, 'Day' => null, 'Start' => null, 'End' => null];
+
+                return [
+                    'EDP Code' => $primary->edp_code,
+                    'Section' => $primary->section?->section_code,
+                    'Subject Code' => $primary->subject?->subject_code,
+                    'Subject' => $primary->subject?->subject_title,
+                    'Faculty' => $primary->faculty?->full_name,
+                    // Kept flat (first Schedule line only) for the
+                    // generic multi-column dump used when no specific
+                    // section is picked — see 'Schedules' below for
+                    // the full per-EDP-Code breakdown the dedicated
+                    // single/multi-section print layouts use instead.
+                    'Room' => $first['Room'],
+                    'Day' => $first['Day'],
+                    'Start' => $first['Start'],
+                    'End' => $first['End'],
+                    'Type' => $primary->section?->section_type,
+                    'Schedules' => $schedules->all(),
+                ];
+            })
+            ->values();
 
         $result = $this->table('Schedule by Section', $rows);
+        // 'Schedules' rides alongside each row for the dedicated
+        // single/multi-section print layouts below — never a real
+        // column in the generic multi-report dump (which would try to
+        // render its nested array as a table cell).
+        $result['columns'] = array_values(array_diff($result['columns'], ['Schedules']));
 
         // Multiple, explicitly-picked (possibly non-contiguous — e.g.
         // BSIT-1, BSIT-3, BSIT-4, skipping BSIT-2) sections: also hand
@@ -337,29 +388,79 @@ class ReportsService
         // apart if run at slightly different times.
         $sectionSubjects = $query->get();
 
-        $rows = $sectionSubjects->map(function (SectionSubject $ss) {
-            $sectionCodes = collect([$ss->section?->section_code])
-                ->merge($ss->mergedPlacements->pluck('section.section_code'))
-                ->filter()
-                ->unique()
-                ->values();
+        $rows = $sectionSubjects
+            // SPLIT-DELIVERY / MULTI-SESSION SCHEDULING — same grouping
+            // rule FacultyWorkloadService::assignedPlacements() applies
+            // on the Faculty Workload tab: every SectionSubject row that
+            // shares the same Faculty+Section+Subject is the SAME
+            // assigned class (e.g. a Face-to-Face/Online split, or a
+            // Lecture/Lab pair meeting on different days), just with
+            // more than one Schedule line — not a second class the
+            // faculty teaches. Without this, one EDP Code could print
+            // twice with its Units counted twice, disagreeing with the
+            // Workload tab's "Assigned Subjects" table for the exact
+            // same faculty/term.
+            ->groupBy(fn (SectionSubject $ss) => $ss->faculty_id.'-'.$ss->section_id.'-'.$ss->subject_id)
+            ->map(function ($group) {
+                // The Face-to-Face half (or the only row, for a class
+                // that was never split) is the group's "primary" row —
+                // its EDP Code identifies the whole group, matching how
+                // the Workload tab picks its primary row.
+                $primary = $group->first(fn (SectionSubject $ss) => $ss->delivery_mode !== 'online') ?? $group->first();
 
-            return [
-                'Faculty' => $ss->faculty?->full_name,
-                'Subject' => $ss->subject?->subject_title,
-                // Host + every merged rider's Section Code, joined with
-                // " & " (e.g. "BSIT-4A & BSIT-4A-IRREG") — same format
-                // as the Workload tab's Assigned Subjects list.
-                'Section' => $sectionCodes->implode(' & '),
-                'Room' => $ss->room?->room_code,
-                'Day' => $ss->days,
-                'Start' => $this->formatTime12h($ss->start_time),
-                'End' => $this->formatTime12h($ss->end_time),
-                'Units' => $ss->subject?->units,
-            ];
-        });
+                $sectionCodes = collect([$primary->section?->section_code])
+                    ->merge($primary->mergedPlacements->pluck('section.section_code'))
+                    ->filter()
+                    ->unique()
+                    ->values();
+
+                // One entry per Schedule line in the group — a
+                // never-split class has exactly one; a split class has
+                // two (Face-to-Face, then Online), rendered as two
+                // Schedule/Room lines under the SAME EDP Code/Subject
+                // row instead of two separate rows.
+                $schedules = $group
+                    ->sortBy(fn (SectionSubject $ss) => $ss->delivery_mode === 'online' ? 1 : 0)
+                    ->map(fn (SectionSubject $ss) => [
+                        'Room' => $ss->delivery_mode === 'online' ? 'Online' : $ss->room?->room_code,
+                        'Day' => $ss->days,
+                        'Start' => $this->formatTime12h($ss->start_time),
+                        'End' => $this->formatTime12h($ss->end_time),
+                    ])
+                    ->values();
+
+                $first = $schedules->first() ?? ['Room' => null, 'Day' => null, 'Start' => null, 'End' => null];
+
+                return [
+                    'EDP Code' => $primary->edp_code,
+                    'Faculty' => $primary->faculty?->full_name,
+                    'Subject Code' => $primary->subject?->subject_code,
+                    'Subject' => $primary->subject?->subject_title,
+                    // Host + every merged rider's Section Code, joined with
+                    // " & " (e.g. "BSIT-4A & BSIT-4A-IRREG") — same format
+                    // as the Workload tab's Assigned Subjects list.
+                    'Section' => $sectionCodes->implode(' & '),
+                    // Kept flat (first Schedule line only) for the
+                    // generic multi-column dump used when no specific
+                    // faculty is picked — see 'Schedules' below for the
+                    // full per-EDP-Code breakdown the dedicated
+                    // single/multi-faculty print layouts use instead.
+                    'Room' => $first['Room'],
+                    'Day' => $first['Day'],
+                    'Start' => $first['Start'],
+                    'End' => $first['End'],
+                    'Units' => $primary->subject?->units,
+                    'Schedules' => $schedules->all(),
+                ];
+            })
+            ->values();
 
         $result = $this->table('Schedule by Faculty', $rows);
+        // 'Schedules' rides alongside each row for the dedicated
+        // single/multi-faculty print layouts below — never a real
+        // column in the generic multi-report dump (which would try to
+        // render its nested array as a table cell).
+        $result['columns'] = array_values(array_diff($result['columns'], ['Schedules']));
 
         // Single, explicitly-picked faculty: hand the Vue page enough to
         // drive the "Send via Email" button (Faculty Schedule Email

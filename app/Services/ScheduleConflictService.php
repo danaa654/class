@@ -328,19 +328,25 @@ class ScheduleConflictService
         $newMinutes = $this->minutesBetween($startTime, $endTime);
         $capMinutes = $capHours * 60;
 
-        $placements = SectionSubject::query()
-            ->where('faculty_id', $facultyId)
-            ->whereIn('section_id', $this->scopedSectionIds($sectionId))
-            ->whereNotIn('id', (array) $excludingSectionSubjectId)
-            ->whereNotNull('days')
-            ->whereNotNull('start_time')
-            ->whereNotNull('end_time')
-            ->get(['id', 'days', 'start_time', 'end_time']);
-
+        // PERFORMANCE — this used to pull every placement this faculty
+        // member has across the whole term into a PHP collection and
+        // re-filter/re-sum it once per requested day (an O(placements
+        // x days) loop running on the request thread for every single
+        // drag/click drop). Doing the per-day sum in SQL with
+        // TIMESTAMPDIFF + a LIKE match on the days column lets the DB
+        // (now aided by the faculty_id/start_time/end_time composite
+        // index — see the accompanying migration) do this in one pass
+        // per day instead of loading rows into memory at all.
         foreach ($dayTokens as $day) {
-            $existingMinutes = $placements
-                ->filter(fn (SectionSubject $p) => str_contains((string) $p->days, $day))
-                ->sum(fn (SectionSubject $p) => $this->minutesBetween($p->start_time, $p->end_time));
+            $existingMinutes = (int) SectionSubject::query()
+                ->where('faculty_id', $facultyId)
+                ->whereIn('section_id', $this->scopedSectionIds($sectionId))
+                ->whereNotIn('id', (array) $excludingSectionSubjectId)
+                ->whereNotNull('days')
+                ->whereNotNull('start_time')
+                ->whereNotNull('end_time')
+                ->where('days', 'like', "%{$day}%")
+                ->sum(\Illuminate\Support\Facades\DB::raw('TIMESTAMPDIFF(MINUTE, start_time, end_time)'));
 
             $projectedMinutes = $existingMinutes + $newMinutes;
 

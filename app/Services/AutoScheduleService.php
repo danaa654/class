@@ -155,6 +155,28 @@ class AutoScheduleService
                 }
             }
 
+            // SPLIT-DELIVERY SCHEDULING — SAME-FACULTY RESYNC (final
+            // pass). generateOne()'s own inline sync (above) only
+            // catches the case where the Online row is processed AFTER
+            // its Face-to-Face sibling already has a Faculty. $targets
+            // is sorted by unit count, not split-pairing, so the
+            // opposite order happens just as often: the Online row
+            // gets processed first (inheriting whatever stale Faculty
+            // it already had, or none), and its Face-to-Face sibling
+            // is independently assigned a Faculty afterward by
+            // searchIndependent()'s Room+Time+Faculty search — which
+            // has no reason to reuse the split subject's OLD Faculty
+            // if a different one scored better. Nothing in that inline
+            // sync runs again once the Face-to-Face half changes, so
+            // the pair could silently end up split across two
+            // different Faculty members for the rest of this run. This
+            // pass runs once, after every row in this batch is
+            // resolved, and re-syncs every split pair Online.faculty_id
+            // to its Face-to-Face sibling's FINAL value — Face-to-Face
+            // is always the authoritative half, since it's the one
+            // actually searched for Faculty/Room/Time availability.
+            $this->resyncSplitFacultyPairs($section);
+
             $mergedCount = collect($results)->where('is_merged', true)->count();
 
             $message = count($results) === $targets->count()
@@ -196,6 +218,40 @@ class AutoScheduleService
                 'message' => $message,
             ];
         });
+    }
+
+    /**
+     * See the call site in generate() for why this exists. Re-reads
+     * every Face-to-Face/Online split pair in $section fresh from the
+     * DB — not limited to rows this run just processed, since a
+     * Face-to-Face half scheduled in an EARLIER run could just as
+     * easily have drifted from its Online sibling as one scheduled in
+     * THIS run — and forces the Online half's faculty_id to match its
+     * Face-to-Face sibling's whenever both are set but disagree. A
+     * pair where either half still has no Faculty is left alone —
+     * there's nothing yet to sync to.
+     */
+    private function resyncSplitFacultyPairs(Section $section): void
+    {
+        $splitRows = $section->sectionSubjects()
+            ->whereIn('delivery_mode', ['face_to_face', 'online'])
+            ->get(['id', 'subject_id', 'delivery_mode', 'faculty_id']);
+
+        $f2fFacultyBySubjectId = $splitRows
+            ->where('delivery_mode', 'face_to_face')
+            ->whereNotNull('faculty_id')
+            ->pluck('faculty_id', 'subject_id');
+
+        $splitRows
+            ->where('delivery_mode', 'online')
+            ->whereNotNull('faculty_id')
+            ->each(function (SectionSubject $onlineRow) use ($f2fFacultyBySubjectId) {
+                $f2fFacultyId = $f2fFacultyBySubjectId->get($onlineRow->subject_id);
+
+                if ($f2fFacultyId && $onlineRow->faculty_id !== $f2fFacultyId) {
+                    $onlineRow->forceFill(['faculty_id' => $f2fFacultyId])->save();
+                }
+            });
     }
 
     /**
@@ -337,6 +393,47 @@ class AutoScheduleService
         // Practicum/OJT placement never occupies.
         if ($sectionSubject->subject?->isPracticum()) {
             return $this->resolvePracticum($section, $sectionSubject);
+        }
+
+        // SPLIT-DELIVERY SCHEDULING — an 'online' row is exempt from
+        // Room conflict detection (see SectionSubject::requiresRoom()),
+        // but the Faculty+Time search below (searchIndependent() ->
+        // RecommendationService::recommendTimes()) currently requires
+        // a room_id to check Time availability against — Room and
+        // Time are resolved together there, not separately. Rather
+        // than risk assigning this row a Room it should never have
+        // (or silently reusing whatever Room its Face-to-Face sibling
+        // got), leave it for the Registrar to assign Faculty/Days/
+        // Time manually until recommendTimes() supports a
+        // Room-independent search. This never blocks the rest of the
+        // batch — every other subject in the Section still runs
+        // through Auto Generate normally.
+        if ($sectionSubject->delivery_mode === 'online') {
+            // SAME-FACULTY RULE — an Online split row is never meant
+            // to have its own independent Faculty; it always follows
+            // whatever Faculty its Face-to-Face sibling already has
+            // (see splitSchedule()'s docblock). If that sibling is
+            // already assigned, inherit it here instead of leaving
+            // the row stuck on "Select faculty" — the Registrar only
+            // ever needs to pick Faculty once per Subject, on the
+            // Face-to-Face half.
+            $siblingFacultyId = SectionSubject::query()
+                ->where('section_id', $section->id)
+                ->where('subject_id', $sectionSubject->subject_id)
+                ->where('delivery_mode', 'face_to_face')
+                ->whereNotNull('faculty_id')
+                ->value('faculty_id');
+
+            if ($siblingFacultyId && $sectionSubject->faculty_id !== $siblingFacultyId) {
+                $sectionSubject->forceFill(['faculty_id' => $siblingFacultyId])->save();
+            }
+
+            return $this->unresolved(
+                $sectionSubject,
+                $siblingFacultyId
+                    ? 'Faculty inherited from this subject\'s Face-to-Face schedule. Auto Generate currently only assigns Days/Time automatically for Face-to-Face schedules — assign Days/Time for this Online row manually.'
+                    : 'This is the Online half of a split subject — Auto Generate currently only assigns Faculty/Days/Time automatically for Face-to-Face schedules. Assign this row manually (its Faculty will match the Face-to-Face half once that one is assigned).',
+            );
         }
 
         // INTELLIGENT IRREGULAR SECTION SCHEDULING — for an Irregular

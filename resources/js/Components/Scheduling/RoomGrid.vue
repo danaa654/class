@@ -40,6 +40,12 @@ const props = defineProps({
     // drag-and-drop write so the backend can reject a stale move
     // with HTTP 409 under its locked transaction.
     expectedScheduleVersion: { type: Number, default: null },
+    // DARK MODE — wired from Show.vue's isDark (see useTheme.js). Only
+    // needed for the raw Tailwind slate-* colors hardcoded into this
+    // grid's own markup below (header row, time labels, borders, cell
+    // hover states); everything else here (neu-card/neu-inset shells,
+    // PrimeVue components) already themes itself off the `.dark` class.
+    isDark: { type: Boolean, default: false },
     schedulingWindow: {
         type: Object,
         default: () => ({
@@ -449,6 +455,13 @@ const blockTitle = (block) => {
 
 const needsRoomPlacement = (row) => {
     if (row.subject?.subject_type === 'practicum') return false;
+    // SPLIT-DELIVERY SCHEDULING — an 'online' row never gets a Room
+    // and never should (see SectionSubject::requiresRoom()), so it
+    // must never count as "needs a Room" here — otherwise it (and
+    // its subject) sits in this Room Grid sidebar forever, even after
+    // it's fully scheduled with Days/Time on the Section Grid/Subjects
+    // tab. Same exclusion as Practicum above, different reason.
+    if (row.delivery_mode === 'online') return false;
     return !row.room_id || !row.days || row.days.length === 0 || !row.start_time || !row.end_time;
 };
 
@@ -2321,7 +2334,7 @@ const removeAssignment = async () => {
                     </div>
                 </div>
 
-                <div class="overflow-x-auto border border-slate-300 rounded-xl">
+                <div class="overflow-x-auto border rounded-xl" :class="isDark ? 'border-white/10' : 'border-slate-300'">
                     <div
                         class="grid text-[13px]"
                         :style="{
@@ -2330,11 +2343,12 @@ const removeAssignment = async () => {
                         }"
                     >
                         <!-- Header row -->
-                        <div class="border-b border-r border-slate-300 bg-slate-100"></div>
+                        <div class="border-b border-r" :class="isDark ? 'border-white/10 bg-[#141D33]' : 'border-slate-300 bg-slate-100'"></div>
                         <div
                             v-for="day in days"
                             :key="`h-${day}`"
-                            class="border-b border-r border-slate-300 bg-slate-100 flex items-center justify-center font-bold text-slate-700"
+                            class="border-b border-r flex items-center justify-center font-bold"
+                            :class="isDark ? 'border-white/10 bg-[#141D33] text-white' : 'border-slate-300 bg-slate-100 text-slate-700'"
                         >
                             {{ dayLabels[day] || day }}
                         </div>
@@ -2345,8 +2359,15 @@ const removeAssignment = async () => {
                         <template v-for="(hour, rowIndex) in hourRows" :key="`t-${hour}`">
                             <div
                                 v-if="!isLunchRow(hour) || isFirstLunchRow(rowIndex)"
-                                class="border-r border-b border-slate-300 flex items-center justify-end px-1.5 leading-none whitespace-nowrap overflow-visible text-[10px]"
-                                :class="isLunchRow(hour) ? 'text-amber-700 font-bold' : (hour.endsWith(':00') ? 'text-slate-700 font-semibold' : 'text-slate-500 font-medium')"
+                                class="border-r border-b flex items-center justify-end px-1.5 leading-none whitespace-nowrap overflow-visible text-[10px]"
+                                :class="[
+                                    isDark ? 'border-white/10' : 'border-slate-300',
+                                    isLunchRow(hour)
+                                        ? (isDark ? 'text-amber-400 font-bold' : 'text-amber-700 font-bold')
+                                        : (hour.endsWith(':00')
+                                            ? (isDark ? 'text-slate-200 font-semibold' : 'text-slate-700 font-semibold')
+                                            : (isDark ? 'text-slate-400 font-medium' : 'text-slate-500 font-medium')),
+                                ]"
                                 :style="{ gridColumn: 1, gridRow: isLunchRow(hour) ? `${rowIndex + 2} / span ${lunchSpan}` : rowIndex + 2 }"
                             >
                                 {{ isLunchRow(hour) ? lunchRangeLabel : formatSlotRange(hour) }}
@@ -2358,8 +2379,11 @@ const removeAssignment = async () => {
                             <template v-for="(hour, rowIndex) in hourRows" :key="`cell-${day}-${hour}`">
                                 <div
                                     v-if="!isCovered(day, rowIndex) && !isGhostCovered(day, rowIndex) && (!isLunchRow(hour) || isFirstLunchRow(rowIndex))"
-                                    class="border-r border-b border-slate-300 relative"
-                                    :class="isLunchRow(hour) ? 'bg-amber-100' : ''"
+                                    class="border-r border-b relative"
+                                    :class="[
+                                        isDark ? 'border-white/10' : 'border-slate-300',
+                                        isLunchRow(hour) ? (isDark ? 'bg-amber-500/20' : 'bg-amber-100') : '',
+                                    ]"
                                     :style="{
                                         gridColumn: dIndex + 2,
                                         gridRow: isLunchRow(hour)

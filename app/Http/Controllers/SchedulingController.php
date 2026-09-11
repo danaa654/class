@@ -3,11 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\College;
+use App\Models\Room;
 use App\Models\Section;
 use App\Models\SectionSubject;
 use App\Models\Faculty;
 use App\Models\ActivityLog;
 use App\Services\ActivityLogService;
+use App\Services\RoomUtilizationService;
 use App\Support\AccessScope;
 use App\Support\ViewingTerm;
 use Illuminate\Http\Request;
@@ -17,6 +19,14 @@ use Inertia\Response;
 
 class SchedulingController extends Controller
 {
+    // RoomUtilizationService is the single source of truth for Room
+    // Utilization (see its own class docblock) — the Rooms page and
+    // the Auto Scheduler's room ranking both read from it, and this
+    // Dashboard now does too, rather than recomputing its own
+    // (previously buggy, previously a meaningless "vs. busiest room"
+    // ratio) version that could disagree with what Rooms actually shows.
+    public function __construct(private readonly RoomUtilizationService $roomUtilization) {}
+
     /**
      * Display the Scheduling Dashboard — a read-only control center
      * summarizing scheduling progress, conflicts, and utilization for
@@ -63,8 +73,29 @@ class SchedulingController extends Controller
         $activeRoomsUsed = (clone $sectionSubjectsQuery)->whereNotNull('room_id')->distinct('room_id')->count('room_id');
         $activeFacultyAssigned = (clone $sectionSubjectsQuery)->whereNotNull('faculty_id')->distinct('faculty_id')->count('faculty_id');
 
-        $noFacultyCount = (clone $sectionSubjectsQuery)->whereNull('faculty_id')->count();
-        $noRoomCount = (clone $sectionSubjectsQuery)->whereNull('room_id')->count();
+        // Practicum/OJT rows never need Faculty either (Subject::isPracticum()) —
+        // same exclusion as noRoomCount below, for the same reason.
+        $noFacultyCount = (clone $sectionSubjectsQuery)
+            ->whereNull('faculty_id')
+            ->whereDoesntHave('subject', function ($subjectQuery) {
+                $subjectQuery->where('subject_type', 'practicum');
+            })
+            ->count();
+        // Rows that are correctly room-less by design don't belong in
+        // this count: 'online' delivery_mode rows are scheduled via
+        // Section Grid's Days/Time instead of a Room (see
+        // SectionSubject::requiresRoom()), and Practicum/OJT rows never
+        // need Faculty/Room/Days/Time at all (Subject::isPracticum()).
+        // Same exclusions SectionController::unassignedSectionSubjectQuery()
+        // already applies for the Sections page's "Fully Scheduled" badge —
+        // kept in sync here so this alert and that badge never disagree.
+        $noRoomCount = (clone $sectionSubjectsQuery)
+            ->whereNull('room_id')
+            ->where('delivery_mode', '!=', 'online')
+            ->whereDoesntHave('subject', function ($subjectQuery) {
+                $subjectQuery->where('subject_type', 'practicum');
+            })
+            ->count();
 
         $sectionsNeedingScheduling = (clone $sectionSubjectsQuery)
             ->where('status', '!=', 'Scheduled')
@@ -102,28 +133,25 @@ class SchedulingController extends Controller
         // Room conflicts: same room, overlapping day tokens, overlapping time.
         $roomConflictCount = $this->countRoomConflicts($sectionIds);
 
-        // Room utilization: how many scheduled meetings use each room,
-        // relative to the busiest room (simple proxy for occupancy %).
-        $roomUsage = SectionSubject::query()
-            ->whereIn('section_subjects.section_id', $sectionIds)
-            ->whereNotNull('section_subjects.room_id')
-            ->join('rooms', 'rooms.id', '=', 'section_subjects.room_id')
-            ->groupBy('rooms.id', 'rooms.room_code', 'rooms.room_name')
-            ->select([
-                'rooms.id',
-                'rooms.room_code',
-                'rooms.room_name',
-                DB::raw('COUNT(*) as bookings'),
-            ])
-            ->orderByDesc('bookings')
-            ->take(8)
-            ->get();
+        // Room utilization — delegated entirely to RoomUtilizationService
+        // (see its class docblock: "the single source of truth for Room
+        // Utilization"), the same service the Rooms page itself calls.
+        // Scoped to Rooms actually touched by a placement in this
+        // Dashboard's viewed term, ranked by utilization_percent, top 8 —
+        // this alone is what changed; the underlying % for any given
+        // Room is now guaranteed identical to what the Rooms page shows.
+        $roomsUsedIds = (clone $sectionSubjectsQuery)->whereNotNull('room_id')->distinct()->pluck('room_id');
+        $roomsUsed = Room::query()->whereIn('id', $roomsUsedIds)->get()->keyBy('id');
+        $roomSummaries = $this->roomUtilization->summarizeRooms($roomsUsed);
 
-        $maxBookings = max(1, $roomUsage->max('bookings') ?? 1);
-        $topRooms = $roomUsage->map(fn ($r) => [
-            'name' => $r->room_name ?: $r->room_code,
-            'occupancy' => (int) round(($r->bookings / $maxBookings) * 100),
-        ])->values();
+        $topRooms = collect($roomSummaries)
+            ->sortByDesc('utilization_percent')
+            ->take(8)
+            ->map(fn ($summary) => [
+                'name' => $roomsUsed->get($summary['room_id'])?->room_name ?? '—',
+                'occupancy' => (int) round($summary['utilization_percent']),
+            ])
+            ->values();
 
         // Progress per college, via Section -> Major -> Department -> College.
         $collegeProgress = College::query()

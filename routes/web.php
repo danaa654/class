@@ -219,6 +219,11 @@ Route::middleware('auth')->group(function () {
     Route::post('/scheduling/section-subjects/{section}/{subject}/faculty-override', [SectionSubjectController::class, 'overrideFaculty'])->name('scheduling.section-subjects.faculty-override');
     Route::get('/scheduling/section-subjects/{section}/{subject}/room-options', [SectionSubjectController::class, 'roomOptions'])->name('scheduling.section-subjects.room-options');
     Route::post('/scheduling/section-subjects/{section}/{subject}/room-override', [SectionSubjectController::class, 'overrideRoom'])->name('scheduling.section-subjects.room-override');
+    // SPLIT-DELIVERY SCHEDULING — turn one subject's schedule row into
+    // a Face-to-Face row + an Online row (split), or collapse a
+    // previously-split pair back into one row (unsplit).
+    Route::post('/scheduling/section-subjects/{section}/{subject}/split', [SectionSubjectController::class, 'splitSchedule'])->name('scheduling.section-subjects.split');
+    Route::post('/scheduling/section-subjects/{section}/{subject}/unsplit', [SectionSubjectController::class, 'unsplitSchedule'])->name('scheduling.section-subjects.unsplit');
     // Busy Time Ranges — for the row's selected Room/Faculty + Days,
     // every already-booked Start/End Time window, so the Start/End
     // Time dropdowns can grey out slots that would conflict before

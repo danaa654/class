@@ -8,6 +8,7 @@ use App\Exceptions\SectionFinalizedException;
 use App\Http\Requests\BatchUpdateSectionSubjectScheduleRequest;
 use App\Http\Requests\StoreSectionRequest;
 use App\Http\Requests\StoreSectionSubjectRequest;
+use App\Http\Requests\StoreSectionSubjectSplitRequest;
 use App\Http\Requests\UpdateSectionSubjectScheduleRequest;
 use App\Models\Curriculum;
 use App\Models\CurriculumItem;
@@ -276,12 +277,58 @@ class SectionSubjectController extends Controller implements HasMiddleware
             ->sortBy(fn ($item) => $item->subject?->subject_code)
             ->values();
 
-        // Every active Curriculum belonging to this Section's own Major,
+        // SPLIT-DELIVERY SCHEDULING — SAME-FACULTY BACKFILL. An Online
+        // row is meant to always carry the same Faculty as its
+        // Face-to-Face sibling (splitSchedule() sets this at the
+        // moment of the split — see its docblock; onFacultyChange() in
+        // Show.vue and AutoScheduleService::resyncSplitFacultyPairs()
+        // keep them in sync afterward too) — there's no supported way
+        // for the two to deliberately disagree, so ANY drift between
+        // them is a bug to self-heal, not a Registrar's deliberate
+        // choice to preserve. This used to only fill an Online row
+        // left completely blank (e.g. a split made before the
+        // Face-to-Face half had a Faculty assigned yet), which missed
+        // the more common drift: Auto Generate assigning the
+        // Face-to-Face half a DIFFERENT Faculty than whatever the
+        // Online half already had (see AutoScheduleService's own
+        // per-run resync for why that still happened even there) —
+        // that left BOTH rows non-null but disagreeing, which the old
+        // whereNull() filter here never caught. Now corrects that case
+        // on every page load too, not just a blank Online row.
+        $facultyBySubjectId = $sectionSubjects
+            ->where('delivery_mode', 'face_to_face')
+            ->whereNotNull('faculty_id')
+            ->pluck('faculty_id', 'subject_id');
+
+        $sectionSubjects
+            ->where('delivery_mode', 'online')
+            ->each(function (SectionSubject $onlineRow) use ($facultyBySubjectId) {
+                $facultyId = $facultyBySubjectId->get($onlineRow->subject_id);
+
+                if ($facultyId && $onlineRow->faculty_id !== $facultyId) {
+                    $onlineRow->forceFill(['faculty_id' => $facultyId])->save();
+                    $onlineRow->setRelation('faculty', $onlineRow->faculty()->first());
+                }
+            });
+
+        // PERFORMANCE — wrapped in closures below (not run eagerly here)
+        // so a partial Inertia reload that doesn't ask for these props
+        // (see refreshSchedule() in Show.vue) skips the underlying
+        // queries entirely instead of just trimming them from the
+        // response payload. A plain PHP closure IS still invoked on a
+        // normal/initial page visit — this only changes what a
+        // *partial* reload after a save (Split, Save Schedule, etc.)
+        // has to recompute. See PropsResolver::resolveProps() in
+        // inertiajs/inertia-laravel: an unresolved prop's closure is
+        // simply never called when its path isn't in that request's
+        // `only` list.
+        //
+        // Every Active Curriculum belonging to this Section's own Major,
         // for the "Load From Curriculum" tab's Curriculum dropdown.
         // Curriculum.major_id is required (one Curriculum = one Major),
         // so this is a hard restriction, not a client-side filter —
         // a BSIT section will never see a BSED curriculum to pick from.
-        $curriculums = Curriculum::query()
+        $curriculums = fn () => Curriculum::query()
             ->where('status', 'Active')
             ->where('major_id', $section->major_id)
             ->orderBy('code')
@@ -302,7 +349,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // references them directly regardless of major_id.
         $placedSubjectIds = $sectionSubjects->pluck('subject_id');
 
-        $availableSubjects = Subject::query()
+        $availableSubjects = fn () => Subject::query()
             ->where('is_active', true)
             ->where(function ($query) use ($section) {
                 $query->where('major_id', $section->major_id)
@@ -318,13 +365,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // per-row client-side without a round trip per cell. General
         // Education Faculty are qualified for every "General Education"
         // subject regardless of their explicit pivot rows.
-        $activeFacultyList = Faculty::query()
-            ->where('status', 'Active')
-            ->with(['subjects:id', 'college:id,name,short_name'])
-            ->orderBy('last_name')
-            ->orderBy('first_name')
-            ->get(['id', 'first_name', 'middle_name', 'last_name', 'suffix', 'college_id', 'max_teaching_units']);
-
+        //
         // PERFORMANCE: current_load for every Active Faculty member,
         // computed in ONE batched query (currentLoadsFor()) instead of
         // one query per Faculty member. Calling
@@ -337,67 +378,78 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // while to open. Mirrors how $roomUtilization below already
         // batches per-Room figures via summarizeRooms() instead of
         // calling into RoomUtilizationService per Room.
-        $facultyCurrentLoads = $this->workloadService->currentLoadsFor($activeFacultyList);
+        $activeFaculty = function () {
+            $activeFacultyList = Faculty::query()
+                ->where('status', 'Active')
+                ->with(['subjects:id', 'college:id,name,short_name'])
+                ->orderBy('last_name')
+                ->orderBy('first_name')
+                ->get(['id', 'first_name', 'middle_name', 'last_name', 'suffix', 'college_id', 'max_teaching_units']);
 
-        $activeFaculty = $activeFacultyList->map(fn (Faculty $faculty) => [
-            'id' => $faculty->id,
-            'full_name' => $faculty->full_name,
-            'faculty_category' => $faculty->faculty_category,
-            'qualified_subject_ids' => $faculty->subjects->pluck('id'),
-            // college_id/college_name — MUST be sent so the
-            // scheduling table's client-side grouping
-            // (facultyGroupsFor in Show.vue) can tell which
-            // College a Faculty member belongs to and group them
-            // the same way Rooms are grouped by type. This was
-            // previously queried but dropped before being handed
-            // to the frontend, which silently broke College-based
-            // grouping (every faculty landed in one flat "Other
-            // Active Faculty" bucket regardless of College).
-            'college_id' => $faculty->college_id,
-            'college_name' => $faculty->college?->short_name ?? $faculty->college?->name ?? 'General Education',
-            // Teaching Load, same source (FacultyWorkloadService)
-            // the recommendation ranking and Save Schedule's
-            // workload guard already use — shown next to every
-            // Faculty option (not just recommended ones) so the
-            // Registrar sees at a glance how close to capacity a
-            // manual pick is before assigning them.
-            'current_load' => $facultyCurrentLoads[$faculty->id] ?? 0,
-            'max_teaching_units' => $faculty->max_teaching_units,
-        ]);
+            $facultyCurrentLoads = $this->workloadService->currentLoadsFor($activeFacultyList);
 
-        $activeRoomsList = Room::query()
-            ->where('status', 'Active')
-            ->with('college:id,name,short_name')
-            ->orderBy('room_code')
-            ->get(['id', 'room_code', 'room_name', 'room_type', 'capacity', 'college_id']);
+            return $activeFacultyList->map(fn (Faculty $faculty) => [
+                'id' => $faculty->id,
+                'full_name' => $faculty->full_name,
+                'faculty_category' => $faculty->faculty_category,
+                'qualified_subject_ids' => $faculty->subjects->pluck('id'),
+                // college_id/college_name — MUST be sent so the
+                // scheduling table's client-side grouping
+                // (facultyGroupsFor in Show.vue) can tell which
+                // College a Faculty member belongs to and group them
+                // the same way Rooms are grouped by type. This was
+                // previously queried but dropped before being handed
+                // to the frontend, which silently broke College-based
+                // grouping (every faculty landed in one flat "Other
+                // Active Faculty" bucket regardless of College).
+                'college_id' => $faculty->college_id,
+                'college_name' => $faculty->college?->short_name ?? $faculty->college?->name ?? 'General Education',
+                // Teaching Load, same source (FacultyWorkloadService)
+                // the recommendation ranking and Save Schedule's
+                // workload guard already use — shown next to every
+                // Faculty option (not just recommended ones) so the
+                // Registrar sees at a glance how close to capacity a
+                // manual pick is before assigning them.
+                'current_load' => $facultyCurrentLoads[$faculty->id] ?? 0,
+                'max_teaching_units' => $faculty->max_teaching_units,
+            ]);
+        };
 
         // Same source (RoomUtilizationService) the Rooms page and the
         // recommendation ranking already read — shown next to every
         // Room option (not just recommended ones), mirroring how
         // activeFaculty above carries current_load/max_teaching_units
         // for every Faculty option.
-        $roomUtilization = $this->roomUtilizationService->summarizeRooms($activeRoomsList);
+        $activeRooms = function () {
+            $activeRoomsList = Room::query()
+                ->where('status', 'Active')
+                ->with('college:id,name,short_name')
+                ->orderBy('room_code')
+                ->get(['id', 'room_code', 'room_name', 'room_type', 'capacity', 'college_id']);
 
-        $activeRooms = $activeRoomsList->map(fn (Room $room) => [
-            'id' => $room->id,
-            'room_code' => $room->room_code,
-            'room_name' => $room->room_name,
-            'room_type' => $room->room_type,
-            'capacity' => $room->capacity,
-            // college_id/college_name — a null college_id means a
-            // Shared room usable by any College (mirrors Faculty's
-            // null-college_id = General Education pool above). MUST
-            // be sent so the scheduling table's client-side Room
-            // College Mismatch check (Show.vue's tableConflicts) can
-            // flag a room that belongs to a DIFFERENT College than
-            // this Section's own — e.g. an SHTM Lab picked for a
-            // BSIT class — the same way it already flags a Room Type
-            // Mismatch, before the Registrar saves.
-            'college_id' => $room->college_id,
-            'college_name' => $room->college?->short_name ?? $room->college?->name ?? null,
-            'scheduled_hours' => $roomUtilization[$room->id]['scheduled_hours'] ?? 0,
-            'max_hours' => $roomUtilization[$room->id]['max_hours'] ?? 0,
-        ]);
+            $roomUtilization = $this->roomUtilizationService->summarizeRooms($activeRoomsList);
+
+            return $activeRoomsList->map(fn (Room $room) => [
+                'id' => $room->id,
+                'room_code' => $room->room_code,
+                'room_name' => $room->room_name,
+                'room_type' => $room->room_type,
+                'capacity' => $room->capacity,
+                // college_id/college_name — a null college_id means a
+                // Shared room usable by any College (mirrors Faculty's
+                // null-college_id = General Education pool above). MUST
+                // be sent so the scheduling table's client-side Room
+                // College Mismatch check (Show.vue's tableConflicts) can
+                // flag a room that belongs to a DIFFERENT College than
+                // this Section's own — e.g. an SHTM Lab picked for a
+                // BSIT class — the same way it already flags a Room Type
+                // Mismatch, before the Registrar saves.
+                'college_id' => $room->college_id,
+                'college_name' => $room->college?->short_name ?? $room->college?->name ?? null,
+                'scheduled_hours' => $roomUtilization[$room->id]['scheduled_hours'] ?? 0,
+                'max_hours' => $roomUtilization[$room->id]['max_hours'] ?? 0,
+            ]);
+        };
 
         // Active School Year's Scheduling Window — the hard 8:00 AM–7:00 PM
         // (or whatever's configured) boundary the manual Day & Time editor
@@ -442,37 +494,26 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // between every Section within that College.
         $sectionCollegeId = $section->major?->department?->college_id;
 
-        $siblingSections = Section::query()
-            ->visibleTo($request->user())
-            ->where('academic_year', $section->academic_year)
-            ->where('semester', $section->semester)
-            ->when(
-                $sectionCollegeId,
-                fn ($query) => $query->whereHas(
-                    'major.department',
-                    fn ($inner) => $inner->where('college_id', $sectionCollegeId),
-                ),
-            )
-            ->with('major:id,name,code')
+        $siblingSections = fn () => Section::withSubjectProgressCounts(
+            Section::query()
+                ->visibleTo($request->user())
+                ->where('academic_year', $section->academic_year)
+                ->where('semester', $section->semester)
+                ->when(
+                    $sectionCollegeId,
+                    fn ($query) => $query->whereHas(
+                        'major.department',
+                        fn ($inner) => $inner->where('college_id', $sectionCollegeId),
+                    ),
+                )
+                ->with('major:id,name,code')
+        )
             // Same "how far along is scheduling?" counts the Sections
-            // list (SectionController::index()) already computes, so the
-            // dropdown can show a status dot (green = Fully Scheduled,
-            // amber = Partially Scheduled, gray = Not Scheduled/No
-            // Subjects Yet) without a second round trip per Section.
-            ->withCount([
-                'sectionSubjects as total_subjects_count',
-                'sectionSubjects as assigned_subjects_count' => function ($query) {
-                    $query->where(function ($inner) {
-                        $inner->whereNotNull('faculty_id')
-                            ->whereNotNull('room_id')
-                            ->whereNotNull('days')
-                            ->whereNotNull('start_time')
-                            ->whereNotNull('end_time');
-                    })->orWhereHas('subject', function ($subjectQuery) {
-                        $subjectQuery->where('subject_type', 'practicum');
-                    });
-                },
-            ])
+            // list (SectionController::index()) already computes — see
+            // Section::withSubjectProgressCounts() — so the dropdown can
+            // show a status dot (green = Fully Scheduled, amber =
+            // Partially Scheduled, gray = Not Scheduled/No Subjects Yet)
+            // without a second round trip per Section.
             ->orderBy('section_code')
             ->get(['id', 'section_code', 'section_name', 'major_id']);
 
@@ -510,7 +551,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
             // enforces server-side, instead of guessing a value here.
             'hardCapUnits' => FacultyLoadRequest::effectiveCapFor($request->user()),
             // Section Information tab (Tab 1) options.
-            'activeMajors' => Major::query()->where('status', 'Active')->orderBy('name')->get(['id', 'name', 'code']),
+            'activeMajors' => fn () => Major::query()->where('status', 'Active')->orderBy('name')->get(['id', 'name', 'code']),
             'yearLevels' => StoreSectionRequest::YEAR_LEVELS,
             'semesterOptions' => StoreSectionRequest::SEMESTERS,
             'academicYears' => $this->academicYearOptions(),
@@ -807,7 +848,14 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // check + write needs the lock.
         $subject->loadMissing('subject');
         if (! empty($dayTokens) && $startTime && $endTime) {
-            $requiredHours = ((int) $subject->subject->lecture_hours) + ((int) $subject->subject->laboratory_hours);
+            // SPLIT-DELIVERY SCHEDULING — a split row (component !==
+            // 'combined') only needs to add up to ITS OWN split_hours
+            // share, not the subject's full weekly total — e.g. the
+            // Online half of a 5-hr subject split into 4 F2F + 1
+            // Online should compare against 1, not 5. An ordinary,
+            // never-split row is unaffected (split_hours is null).
+            $requiredHours = $subject->split_hours
+                ?? (((int) $subject->subject->lecture_hours) + ((int) $subject->subject->laboratory_hours));
             if ($requiredHours <= 0) {
                 $requiredHours = 3; // matches RecommendationService::scoreArbitraryTime()'s fallback
             }
@@ -949,9 +997,18 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 // Coordinator/Adviser, and is optional per
                 // resolvePracticum()'s docblock), so it's never held at
                 // Draft waiting on fields that will never be filled.
+                //
+                // SPLIT-DELIVERY SCHEDULING — an 'online' row DOES still
+                // need Days/Start/End (it meets at a real time, just with
+                // no physical Room), so it's only exempt from the Room
+                // requirement, not the whole schedule — unlike Practicum.
                 $status = 'Draft';
                 if ($subject->subject->isPracticum()) {
                     $status = 'Scheduled';
+                } elseif ($subject->delivery_mode === 'online') {
+                    if ($facultyId && ! empty($dayTokens) && $startTime && $endTime) {
+                        $status = 'Scheduled';
+                    }
                 } elseif ($facultyId && $roomId && ! empty($dayTokens) && $startTime && $endTime) {
                     $status = 'Scheduled';
                 }
@@ -980,7 +1037,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
 
                 $subject->update([
                     'faculty_id' => $facultyId,
-                    'room_id' => $subject->subject->isPracticum() ? null : $roomId,
+                    'room_id' => ($subject->subject->isPracticum() || $subject->delivery_mode === 'online') ? null : $roomId,
                     'days' => $subject->subject->isPracticum() ? null : ($days ?: null),
                     'start_time' => $subject->subject->isPracticum() ? null : $startTime,
                     'end_time' => $subject->subject->isPracticum() ? null : $endTime,
@@ -2701,8 +2758,12 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 // save can persist rows that never went through the
                 // single-cell endpoint (e.g. Auto Generate results
                 // accepted as-is).
+                // SPLIT-DELIVERY SCHEDULING — compare against this
+                // row's own split_hours share when it has one (see
+                // matching comment in updateSchedule() above).
                 if (! empty($days) && $startTime && $endTime) {
-                    $requiredHours = ((int) $subject->subject->lecture_hours) + ((int) $subject->subject->laboratory_hours);
+                    $requiredHours = $subject->split_hours
+                        ?? (((int) $subject->subject->lecture_hours) + ((int) $subject->subject->laboratory_hours));
                     if ($requiredHours <= 0) {
                         $requiredHours = 3;
                     }
@@ -2797,16 +2858,23 @@ class SectionSubjectController extends Controller implements HasMiddleware
 
                 // Same Practicum/OJT exemption as updateSchedule() above
                 // — no Room/Days/Time is ever required for these rows.
+                // SPLIT-DELIVERY SCHEDULING — an 'online' row still needs
+                // Days/Start/End, just never a Room (see updateSchedule()'s
+                // matching comment above for why this differs from Practicum).
                 $status = 'Draft';
                 if ($subject->subject->isPracticum()) {
                     $status = 'Scheduled';
+                } elseif ($subject->delivery_mode === 'online') {
+                    if ($facultyId && ! empty($dayTokens) && $startTime && $endTime) {
+                        $status = 'Scheduled';
+                    }
                 } elseif ($facultyId && $roomId && ! empty($dayTokens) && $startTime && $endTime) {
                     $status = 'Scheduled';
                 }
 
                 $subject->update([
                     'faculty_id' => $facultyId,
-                    'room_id' => $subject->subject->isPracticum() ? null : $roomId,
+                    'room_id' => ($subject->subject->isPracticum() || $subject->delivery_mode === 'online') ? null : $roomId,
                     'days' => $subject->subject->isPracticum() ? null : ($days ?: null),
                     'start_time' => $subject->subject->isPracticum() ? null : $startTime,
                     'end_time' => $subject->subject->isPracticum() ? null : $endTime,
@@ -3188,6 +3256,224 @@ class SectionSubjectController extends Controller implements HasMiddleware
         $count = count($validated['subject_ids']);
 
         return back()->with('success', $count === 1 ? 'Subject added to the section.' : "{$count} subjects added to the section.");
+    }
+
+    /**
+     * SPLIT-DELIVERY SCHEDULING — turn one 'combined' SectionSubject
+     * row into two rows: a Face-to-Face row (keeps a Room, still
+     * subject to Room conflict detection) and an Online row (never
+     * gets a Room, skipped by Room conflict detection — see
+     * SectionSubject::requiresRoom()).
+     *
+     * Only ever called on a row that is still 'combined' — a subject
+     * already split can't be split again (unsplitSchedule() first).
+     * The two resulting rows share the same edp_code prefix concept
+     * as everything else here but each keeps ITS OWN faculty/room/
+     * days/time — they are independently scheduled from this point
+     * on, exactly like two ordinary SectionSubject rows.
+     *
+     * SIBLING-SECTION PROPAGATION — splitting CC101 in BSIT-1A also
+     * splits CC101 in every OTHER section of the same Major and same
+     * Academic Year/Semester (BSIT-1B, 1C, etc.), using the SAME
+     * f2f_hours/online_hours breakdown, so the Registrar doesn't have
+     * to repeat "Split Hours" by hand for every section offering the
+     * same subject. This propagates the HOURS BREAKDOWN only — each
+     * sibling section still keeps (or, for its new Online row, starts
+     * with) its OWN Faculty, and still needs its OWN Room/Days/Time
+     * assigned separately; two different sections' worth of students
+     * can never share one Room/Time slot, so that part is deliberately
+     * NOT copied. Siblings that are finalized (locked) or whose CC101
+     * row is already split are skipped rather than failing the whole
+     * request.
+     */
+    public function splitSchedule(StoreSectionSubjectSplitRequest $request, Section $section, SectionSubject $subject): JsonResponse
+    {
+        $validated = $request->validated();
+
+        $updated = DB::transaction(function () use ($section, $subject, $validated) {
+            $lockedSection = $this->conflictService->lockResources(null, null, $section->id);
+
+            // The existing row becomes the Face-to-Face half. It keeps
+            // its own id, faculty_id, room_id, days, start_time, and
+            // end_time exactly as they were — the Registrar re-checks
+            // those afterward on the (now shorter) hours this row
+            // covers, same as any other manual schedule edit.
+            $subject->update([
+                'component' => 'laboratory',
+                'delivery_mode' => 'face_to_face',
+                'split_hours' => $validated['f2f_hours'],
+            ]);
+
+            // The Online half is a brand-new row. Days/Time are left
+            // empty for the Registrar to assign — Room is
+            // intentionally never set here and never should be for an
+            // 'online' delivery_mode row (see requiresRoom()).
+            //
+            // SAME-FACULTY RULE — a split subject is still taught by
+            // ONE faculty member across both its F2F and Online
+            // halves, so the Online row starts out with whatever
+            // Faculty the original row already had (if any) rather
+            // than an empty dropdown. onFacultyChange() in Show.vue
+            // keeps the two rows in sync afterward if the Registrar
+            // changes it on either one.
+            // SHARED EDP CODE — the Online half is the same subject
+            // offering as the Face-to-Face half above, just broken
+            // into a second schedule component. It must carry the
+            // ORIGINAL row's edp_code, not a freshly minted one — two
+            // codes for one subject/section made it look like the
+            // Registrar was offering CC101 twice (see the print
+            // report). Set edp_code directly here instead of calling
+            // edpCodeService->generateForSectionSubject(), which only
+            // mints a NEW code and is a no-op once edp_code is already
+            // set — calling it here would defeat the purpose.
+            $onlineRow = SectionSubject::create([
+                'section_id' => $section->id,
+                'subject_id' => $subject->subject_id,
+                'component' => 'lecture',
+                'delivery_mode' => 'online',
+                'split_hours' => $validated['online_hours'],
+                'faculty_id' => $subject->faculty_id,
+                'source' => $subject->source,
+                'capacity' => $subject->capacity,
+                'status' => 'Draft',
+                'edp_code' => $subject->edp_code,
+            ]);
+
+            $onlineRow->setRelation('section', $section->loadMissing('major'));
+
+            $this->splitSiblingSections($section, $subject, $validated);
+
+            $this->conflictService->bumpScheduleVersion($lockedSection);
+
+            return [$subject->fresh(), $onlineRow->fresh()];
+        });
+
+        $siblingCount = $this->lastSiblingSplitCount ?? 0;
+        $this->lastSiblingSplitCount = null;
+
+        return response()->json([
+            'message' => $siblingCount > 0
+                ? "Subject split into Face-to-Face and Online schedules — also split the same way in {$siblingCount} other section(s)."
+                : 'Subject split into Face-to-Face and Online schedules.',
+            'section_subjects' => $updated,
+        ]);
+    }
+
+    /**
+     * The count set by splitSiblingSections() for the current request,
+     * purely so splitSchedule() can report it in its response message
+     * without changing that method's return shape.
+     */
+    private ?int $lastSiblingSplitCount = null;
+
+    /**
+     * Applies the same f2f_hours/online_hours split to every OTHER
+     * section's still-'combined' row for this subject, within the
+     * same Major + Academic Year + Semester as $section. See
+     * splitSchedule()'s docblock for why this exists and what it does
+     * (and does not) copy. Must run inside splitSchedule()'s
+     * transaction, since a failure partway through should roll back
+     * the original section's split too.
+     */
+    private function splitSiblingSections(Section $section, SectionSubject $subject, array $validated): void
+    {
+        $siblingRows = SectionSubject::query()
+            ->where('subject_id', $subject->subject_id)
+            ->where('component', 'combined')
+            ->where('section_id', '!=', $section->id)
+            ->whereHas('section', function ($query) use ($section) {
+                $query->where('major_id', $section->major_id)
+                    ->where('academic_year', $section->academic_year)
+                    ->where('semester', $section->semester);
+            })
+            ->with('section.major')
+            ->get();
+
+        $splitCount = 0;
+
+        foreach ($siblingRows as $siblingRow) {
+            try {
+                // Locks (and re-checks is_finalized on) the SIBLING
+                // section specifically — a finalized sibling is
+                // skipped, not a reason to fail BSIT-1A's own split.
+                $this->conflictService->lockResources(null, null, $siblingRow->section_id);
+            } catch (SectionFinalizedException) {
+                continue;
+            }
+
+            $siblingRow->update([
+                'component' => 'laboratory',
+                'delivery_mode' => 'face_to_face',
+                'split_hours' => $validated['f2f_hours'],
+            ]);
+
+            // SHARED EDP CODE — same reasoning as the primary section's
+            // split above: this sibling's Online row is that SAME
+            // sibling section's SAME subject offering, so it takes
+            // $siblingRow's own edp_code rather than generating a new
+            // one.
+            $siblingOnlineRow = SectionSubject::create([
+                'section_id' => $siblingRow->section_id,
+                'subject_id' => $siblingRow->subject_id,
+                'component' => 'lecture',
+                'delivery_mode' => 'online',
+                'split_hours' => $validated['online_hours'],
+                // The sibling section's OWN faculty (if it already had
+                // one assigned), never $section's — see this method's
+                // docblock. A sibling with no faculty yet gets an
+                // empty dropdown on both its halves, same as before.
+                'faculty_id' => $siblingRow->faculty_id,
+                'source' => $siblingRow->source,
+                'capacity' => $siblingRow->capacity,
+                'status' => 'Draft',
+                'edp_code' => $siblingRow->edp_code,
+            ]);
+
+            $siblingOnlineRow->setRelation('section', $siblingRow->section);
+
+            $splitCount++;
+        }
+
+        $this->lastSiblingSplitCount = $splitCount;
+    }
+
+    /**
+     * Reverse a split — collapses the Online row back into its
+     * Face-to-Face sibling, which becomes an ordinary 'combined' row
+     * again. The Online row's own Faculty/Days/Time (if any were set)
+     * are discarded; only the Face-to-Face row survives, matching
+     * how the row looked immediately before it was split.
+     */
+    public function unsplitSchedule(Section $section, SectionSubject $subject): JsonResponse
+    {
+        $sibling = SectionSubject::where('section_id', $section->id)
+            ->where('subject_id', $subject->subject_id)
+            ->where('id', '!=', $subject->id)
+            ->first();
+
+        $updated = DB::transaction(function () use ($section, $subject, $sibling) {
+            $lockedSection = $this->conflictService->lockResources(null, null, $section->id);
+
+            $survivor = $subject->delivery_mode === 'face_to_face' ? $subject : $sibling;
+            $toDelete = $survivor?->id === $subject->id ? $sibling : $subject;
+
+            $toDelete?->delete();
+
+            $survivor?->update([
+                'component' => 'combined',
+                'delivery_mode' => 'face_to_face',
+                'split_hours' => null,
+            ]);
+
+            $this->conflictService->bumpScheduleVersion($lockedSection);
+
+            return $survivor?->fresh();
+        });
+
+        return response()->json([
+            'message' => 'Split undone — subject merged back into a single schedule.',
+            'section_subject' => $updated,
+        ]);
     }
 
     /**

@@ -84,8 +84,24 @@ const systemItems = [
     { label: 'Settings', route: 'settings', icon: 'pi pi-cog' },
 ];
 
+// A few nav items are "sections" of the app rather than single pages
+// — clicking a row takes you into a detail route with a different
+// name, but you're still logically inside that nav item. Plain
+// route().current(routeName) only matches the exact name, so it goes
+// dark the moment you drill in. These three get a wildcard match
+// against their whole route-name family instead; every other nav
+// item keeps its exact-match behavior untouched.
+const WILDCARD_NAV_ROUTES = {
+    'scheduling.sections': ['scheduling.sections*', 'scheduling.section-subjects*'],
+    'scheduling.faculty': ['scheduling.faculty*'],
+    curriculums: ['curriculums*'],
+};
+
 const isActive = (routeName) => {
     try {
+        if (WILDCARD_NAV_ROUTES[routeName]) {
+            return WILDCARD_NAV_ROUTES[routeName].some((pattern) => route().current(pattern));
+        }
         return route().current(routeName);
     } catch (e) {
         return false;

@@ -203,4 +203,61 @@ class Section extends Model
             $inner->where('college_id', $collegeId ?? -1);
         });
     }
+
+    /**
+     * SCHEDULING-PROGRESS INDICATOR ("Fully/Partially Scheduled
+     * (x/y)") — counts distinct SUBJECTS, not section_subjects rows.
+     *
+     * A split-delivery subject (see SectionSubject::isSplitComponent())
+     * stores its Face-to-Face half and Online half as two separate
+     * section_subjects rows sharing one subject_id. Counting rows would
+     * make CC102 worth "2" toward both the numerator and denominator —
+     * inflating the total and making a school with lots of split
+     * subjects look "more scheduled" than one that never splits
+     * anything, for no real reason. This counts each subject once:
+     * total_subjects_count = number of distinct subjects on the
+     * section; assigned_subjects_count = number of those subjects
+     * where EVERY one of its rows (both halves, for a split subject)
+     * has Faculty/Days/Start/End filled in, with Room required only
+     * for the non-Online half — a Practicum/OJT subject's row(s)
+     * always count as done, same exemption the row-level check already
+     * gave them.
+     *
+     * Callers that used to do:
+     *     ->withCount(['sectionSubjects as total_subjects_count', 'sectionSubjects as assigned_subjects_count' => ...])
+     * should call this instead:
+     *     Section::withSubjectProgressCounts(Section::query()->...)
+     *
+     * @param  \Illuminate\Database\Eloquent\Builder<Section>  $query
+     * @return \Illuminate\Database\Eloquent\Builder<Section>
+     */
+    public static function withSubjectProgressCounts($query)
+    {
+        return $query->addSelect([
+            'total_subjects_count' => SectionSubject::query()
+                ->selectRaw('count(distinct subject_id)')
+                ->whereColumn('section_subjects.section_id', 'sections.id'),
+            'assigned_subjects_count' => SectionSubject::query()
+                ->selectRaw('count(distinct subject_id)')
+                ->whereColumn('section_subjects.section_id', 'sections.id')
+                ->whereNotExists(function ($notExists) {
+                    $notExists->selectRaw('1')
+                        ->from('section_subjects as ss2')
+                        ->join('subjects as sub2', 'sub2.id', '=', 'ss2.subject_id')
+                        ->whereColumn('ss2.section_id', 'section_subjects.section_id')
+                        ->whereColumn('ss2.subject_id', 'section_subjects.subject_id')
+                        ->where('sub2.subject_type', '!=', 'practicum')
+                        ->where(function ($unfinished) {
+                            $unfinished->whereNull('ss2.faculty_id')
+                                ->orWhereNull('ss2.days')
+                                ->orWhereNull('ss2.start_time')
+                                ->orWhereNull('ss2.end_time')
+                                ->orWhere(function ($needsRoom) {
+                                    $needsRoom->whereNull('ss2.room_id')
+                                        ->where('ss2.delivery_mode', '!=', 'online');
+                                });
+                        });
+                }),
+        ]);
+    }
 }
