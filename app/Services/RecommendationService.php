@@ -484,9 +484,15 @@ class RecommendationService
                 ->where('status', 'Active')
                 ->with(['subjects:id']);
 
+            // The GenEd pool is "no College" faculty PLUS faculty from
+            // any College that has opted in via counts_as_gened (e.g.
+            // College of Teacher Education faculty who teach most of
+            // this school's GenEd/Minor load despite belonging to a
+            // real College). See colleges.counts_as_gened.
             $collegeQuery = $collegeId !== null
                 ? $collegeQuery->where('college_id', $collegeId)
-                : $collegeQuery->whereNull('college_id');
+                : $collegeQuery->where(fn ($q) => $q->whereNull('college_id')
+                    ->orWhereHas('college', fn ($c) => $c->where('counts_as_gened', true)));
 
             $collegeFaculty = $collegeQuery->get();
 
@@ -555,7 +561,17 @@ class RecommendationService
                         ->orWhere('faculty_id', 'like', "%{$search}%");
                 })
                 ->whereNotIn('id', $recommendedIds)
-                ->with(['subjects:id', 'college:id,name,short_name'])
+                // FIX: 'counts_as_gened' MUST be selected here — this
+                // partial eager load previously only pulled
+                // id/name/short_name, so scoreArbitraryFaculty()'s
+                // $faculty->college?->counts_as_gened read below always
+                // came back null (falsy) regardless of what a College
+                // was actually flagged as in Academic Structure. That
+                // silently defeated the "Counts as General Education
+                // provider" setting for every faculty search result,
+                // mislabeling a legitimate GenEd-provider match as a
+                // "Manual Override" needing correction.
+                ->with(['subjects:id', 'college:id,name,short_name,counts_as_gened'])
                 ->limit(20)
                 ->get();
 
@@ -595,13 +611,25 @@ class RecommendationService
     public function scoreArbitraryFaculty(Faculty $faculty, Subject $subject, Section $section, ?SectionSubject $current = null): array
     {
         $subject->loadMissing('major.department');
-        $faculty->loadMissing(['subjects:id', 'college:id,name,short_name']);
+        // FIX: same missing-column bug as the search-results eager
+        // load above — 'counts_as_gened' MUST be included here too,
+        // or $faculty->college?->counts_as_gened on the next line
+        // always evaluates false, silently ignoring the College's
+        // "Counts as General Education provider" setting and
+        // mislabeling that faculty's GenEd assignment as a
+        // "Manual Override" (with the scary yellow warning) even
+        // when it's a fully legitimate, intended match. This is what
+        // caused GARCIA, VIRRA FLOR T. (College of Teacher Education,
+        // flagged as a GenEd provider) to show "Manual Override" on
+        // Art Appreciation (a General Education subject) during Auto
+        // Generate, instead of "General Education Match".
+        $faculty->loadMissing(['subjects:id', 'college:id,name,short_name,counts_as_gened']);
 
         $isQualified = $faculty->subjects->contains('id', $subject->id);
         $collegeId = $this->subjectCollegeId($subject);
         $isGenEdSubject = $collegeId === null;
         $isCollegeMatch = ! $isGenEdSubject && $faculty->college_id === $collegeId;
-        $isGenEdMatch = $isGenEdSubject && $faculty->college_id === null;
+        $isGenEdMatch = $isGenEdSubject && ($faculty->college_id === null || (bool) $faculty->college?->counts_as_gened);
 
         $tier = match (true) {
             $isQualified => 'teaching_qualification',
@@ -1896,6 +1924,93 @@ class RecommendationService
      * on the same day counts as "excessive consecutive class hours."
      */
     private const MAX_CONSECUTIVE_MEETINGS = 3;
+
+    /**
+     * SHARED ONLINE SESSION CANDIDATES — for a still-unscheduled
+     * Online row, find other Regular sections' Online classes this
+     * row could ride along on instead of getting its own separate
+     * time slot: same Subject, same Year Level, same Faculty (once
+     * this row already has one picked), same Major + equivalent
+     * Curriculum, and the same Academic Year + Semester as this
+     * row's own Section. E.g. BSIT-1A and BSIT-1B both taking CC101
+     * under the same instructor can sit in on one combined Online
+     * session instead of booking that Faculty member twice.
+     *
+     * Purely a SUGGESTION finder — never writes anything. Applying
+     * one of these goes through the exact same
+     * `merge_target_section_subject_id` ("Shared Class") write path
+     * SectionSubjectController::performScheduleAssignmentUpdate()
+     * already uses (re-validated fresh there via
+     * IrregularSectionMergeService::evaluateReversePlacement(), which
+     * is not actually Irregular-specific — see its docblock), so a
+     * candidate that's gone stale by the time the Registrar clicks it
+     * is still caught before anything saves.
+     *
+     * Deliberately ONLINE-ONLY (room_id null on both sides) — a
+     * face-to-face class merge still has a physical room capacity to
+     * respect and stays on the Irregular-merge flow's existing
+     * "Combine Sections?" path; this is only for Online rows where
+     * there's no seat ceiling to check.
+     *
+     * @return list<array{section_subject_id:int, section_id:int, section_code:?string, section_name:?string, faculty_id:int, faculty_name:?string, days:list<string>, start_time:string, end_time:string}>
+     */
+    public function findOnlineMergeCandidates(SectionSubject $current): array
+    {
+        $current->loadMissing(['section']);
+        $section = $current->section;
+
+        if (! $section) {
+            return [];
+        }
+
+        $equivalentCurriculumIds = \App\Models\Curriculum::query()
+            ->where('major_id', $section->major_id)
+            ->pluck('id');
+
+        $query = SectionSubject::query()
+            ->where('subject_id', $current->subject_id)
+            ->where('section_id', '!=', $current->section_id)
+            ->whereNull('room_id')
+            ->whereNotNull('faculty_id')
+            ->whereNotNull('days')
+            ->where('days', '!=', '')
+            ->whereNotNull('start_time')
+            ->whereNotNull('end_time')
+            ->whereHas('section', function ($q) use ($section, $equivalentCurriculumIds) {
+                $q->where('section_type', 'Regular')
+                    ->where('year_level', $section->year_level)
+                    ->where('major_id', $section->major_id)
+                    ->whereIn('curriculum_id', $equivalentCurriculumIds)
+                    ->where('academic_year', $section->academic_year)
+                    ->where('semester', $section->semester);
+            });
+
+        // Once this row already has a Faculty picked, only offer
+        // sessions taught by that SAME Faculty — merging is meant to
+        // save one instructor from teaching the same class twice, not
+        // to silently reassign the row to a different teacher.
+        if ($current->faculty_id) {
+            $query->where('faculty_id', $current->faculty_id);
+        }
+
+        return $query
+            ->with(['section:id,section_code,section_name', 'faculty:id,first_name,last_name'])
+            ->orderBy('start_time')
+            ->limit(self::MAX_TIME_RESULTS)
+            ->get()
+            ->map(fn (SectionSubject $candidate) => [
+                'section_subject_id' => $candidate->id,
+                'section_id' => $candidate->section_id,
+                'section_code' => $candidate->section?->section_code,
+                'section_name' => $candidate->section?->section_name,
+                'faculty_id' => $candidate->faculty_id,
+                'faculty_name' => $candidate->faculty?->full_name,
+                'days' => array_values(array_filter(explode(',', (string) $candidate->days))),
+                'start_time' => $candidate->start_time,
+                'end_time' => $candidate->end_time,
+            ])
+            ->all();
+    }
 
     public function recommendTimes(
         Subject $subject,

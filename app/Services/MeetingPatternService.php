@@ -239,17 +239,32 @@ class MeetingPatternService
      * accidentally reintroduce 3+ meeting/week schedules until that
      * ceiling is deliberately raised.
      *
-     * Hour-aware bump: a Subject's Type only sets the *default* — if
-     * its total weekly hours (lecture + laboratory) wouldn't fit in a
-     * single reasonable block (max_continuous_hours, default 3h), the
-     * frequency is bumped up so the extra hours get their own
-     * meeting instead of one unrealistically long block. E.g. a
-     * "Special" (1x/week default) Capstone subject worth 4
+     * PREFER ONE STRAIGHT BLOCK — if the Subject's full weekly hours
+     * already fit inside a single continuous meeting
+     * (max_continuous_hours), it's scheduled as ONE meeting/week,
+     * full stop, no matter what its Type's textbook default says.
+     * A 2-hour Lecture subject does not need to be split MW/TTH just
+     * because "Lecture" defaults to 2x/week — that default only
+     * matters once the hours genuinely don't fit in one sitting.
+     *
+     * Hour-aware bump: once a Subject's total weekly hours (lecture +
+     * laboratory) DON'T fit in a single reasonable block
+     * (max_continuous_hours, default 3h), the frequency is bumped up
+     * — starting from the Type's default — so the extra hours get
+     * their own meeting instead of one unrealistically long block.
+     * E.g. a "Special" (1x/week default) Capstone subject worth 4
      * hours/week becomes 2 meetings/week (2h + 2h) automatically,
      * still capped by max_meetings_per_week.
      */
     public function meetingsPerWeek(Subject $subject): int
     {
+        $totalHours = (int) $subject->lecture_hours + (int) $subject->laboratory_hours;
+        $maxContinuousHours = (float) config('scheduling.meeting_patterns.max_continuous_hours', 3);
+
+        if ($totalHours > 0 && $maxContinuousHours > 0 && $totalHours <= $maxContinuousHours) {
+            return 1;
+        }
+
         $type = $this->classify($subject);
 
         $configured = config("scheduling.meeting_patterns.meetings_per_week.{$type}");

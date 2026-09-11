@@ -439,6 +439,64 @@ class FacultyController extends Controller
     }
 
     /**
+     * QUICK "ADD UNITS" — a lightweight, single-field counterpart to
+     * update() for the one field the Scheduling Dashboard's Faculty
+     * Utilization widget needs to edit in place: the load ceiling
+     * (max_teaching_units, or max_weekly_hours for an hours-based
+     * faculty member). Deliberately doesn't touch update()'s full
+     * FormRequest (name/status/college/etc.) — the Dashboard widget
+     * only ever has a faculty's name and current load in view, not
+     * the rest of their profile, so re-sending the whole record isn't
+     * possible from there. Same authorization gate, same cap, and the
+     * same notification as a direct max-load edit from the Faculty
+     * Details page, so this can never grant a wider write path than
+     * update() already does — see FacultyPolicy::changeMaxLoad() and
+     * FacultyLoadRequest::effectiveCapFor().
+     */
+    public function updateMaxLoad(Request $request, Faculty $faculty): RedirectResponse
+    {
+        $this->authorize('changeMaxLoad', Faculty::class);
+
+        $usesHours = $faculty->workload_type === 'hours';
+        $cap = $usesHours ? 168 : FacultyLoadRequest::effectiveCapFor($request->user());
+
+        $data = $request->validate([
+            'value' => ['required', 'integer', 'min:0', "max:{$cap}"],
+        ]);
+
+        $oldMaxTeachingUnits = $faculty->max_teaching_units;
+
+        if ($usesHours) {
+            $faculty->max_weekly_hours = $data['value'];
+        } else {
+            $faculty->max_teaching_units = $data['value'];
+        }
+
+        $faculty->save();
+
+        if (! $usesHours && $data['value'] !== $oldMaxTeachingUnits) {
+            $this->notifications->facultyMaxLoadEditedDirectly(
+                $faculty,
+                $request->user(),
+                $oldMaxTeachingUnits,
+                $data['value'],
+                $this->workloadService,
+            );
+        }
+
+        $facultyName = trim(($faculty->first_name ?? '').' '.($faculty->last_name ?? ''));
+
+        $this->activityLog->record(
+            ActivityLogService::FACULTY_UPDATED,
+            "{$request->user()->full_name} updated {$facultyName}'s maximum load to {$data['value']} ".($usesHours ? 'hour(s).' : 'unit(s).'),
+            $faculty,
+            $request->user(),
+        );
+
+        return back()->with('success', "Updated {$facultyName}'s maximum load.");
+    }
+
+    /**
      * Permanently remove a faculty member from the Faculty Master
      * (Admin/Registrar only — Dean/OIC/Assistant Dean have no direct
      * delete path; they may still request deactivation instead, see

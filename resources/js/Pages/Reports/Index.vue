@@ -417,18 +417,30 @@ const gridIsFirstLunchRow = (rowIndex) => gridLunchRowIndices.value[0] === rowIn
 const gridLunchSpan = computed(() => gridLunchRowIndices.value.length || 1);
 const gridLunchRangeLabel = computed(() => `${formatHourLabel(props.schedulingWindow.lunch_start || '12:00')} – ${formatHourLabel(props.schedulingWindow.lunch_end || '13:00')}`);
 
+// A row may carry more than one meeting — a Face-to-Face/Online split
+// (or a Lecture/Lab pair) rides as a 'Schedules' array alongside the
+// flat Day/Start/End/Room fields (see ReportsService::scheduleByFaculty()).
+// The Grid needs every meeting the row actually has, not just the first
+// (Face-to-Face) one those flat fields reflect — this expands each row
+// into its full list of {Room, Day, Start, End} meetings, falling back
+// to the flat fields themselves for report types that never split.
+const rowSchedules = (row) => (row.Schedules?.length ? row.Schedules : [{ Room: row.Room, Day: row.Day, Start: row.Start, End: row.End }]);
+
 // Only the days that actually appear in this report's rows, in
 // calendar order — a room/faculty with no Saturday classes doesn't
 // need an empty Saturday column.
 const gridDays = computed(() => {
     const present = new Set();
-    (props.report?.rows ?? []).forEach((row) => (row.Day || '').split(',').map((d) => d.trim()).filter(Boolean).forEach((d) => present.add(d)));
+    (props.report?.rows ?? []).forEach((row) => rowSchedules(row).forEach((s) => (s.Day || '').split(',').map((d) => d.trim()).filter(Boolean).forEach((d) => present.add(d))));
     return gridAllDays.value.filter((d) => present.has(d));
 });
 
-// One block per (day, row) this report's rows actually occupy —
+// One block per (day, meeting) this report's rows actually occupy —
 // startIndex/span computed the same way RoomGrid.vue computes them for
-// its own draggable blocks, just read-only here.
+// its own draggable blocks, just read-only here. A split class (e.g.
+// Face-to-Face Mon + Online Fri) contributes one block per meeting, each
+// carrying its own Room (so the Online meeting's cell reads "Online"
+// instead of silently reusing the Face-to-Face room).
 const gridBlocks = computed(() => {
     const rows = props.report?.rows ?? [];
     const gridStart = toMinutes24(gridHourRows.value[0] || '07:00');
@@ -436,24 +448,58 @@ const gridBlocks = computed(() => {
     const blocks = [];
 
     rows.forEach((row) => {
-        const startMin = timeToMinutes12h(row.Start);
-        const endMin = timeToMinutes12h(row.End);
-        if (startMin === null || endMin === null) return;
+        rowSchedules(row).forEach((schedule) => {
+            const startMin = timeToMinutes12h(schedule.Start);
+            const endMin = timeToMinutes12h(schedule.End);
+            if (startMin === null || endMin === null) return;
 
-        const startIndex = Math.max(0, Math.round((startMin - gridStart) / step));
-        const span = Math.max(1, Math.round((endMin - startMin) / step));
+            const startIndex = Math.max(0, Math.round((startMin - gridStart) / step));
+            const span = Math.max(1, Math.round((endMin - startMin) / step));
 
-        (row.Day || '').split(',').map((d) => d.trim()).filter(Boolean).forEach((day) => {
-            if (!gridDays.value.includes(day)) return;
-            blocks.push({ ...row, day, startIndex, span });
+            (schedule.Day || '').split(',').map((d) => d.trim()).filter(Boolean).forEach((day) => {
+                if (!gridDays.value.includes(day)) return;
+                blocks.push({ ...row, ...schedule, day, startIndex, span });
+            });
         });
     });
 
-    return blocks;
+    // MERGED / SHARED SESSIONS — a faculty-shortage merge (e.g. a single
+    // Online lecture run for two independent Sections, BSIT-1A and
+    // BSIT-1B, at the same time) produces one block per Section from the
+    // loop above, both landing in the exact same cell. Left as two
+    // separate blocks, the grid could only ever show one (whichever the
+    // template happened to look up), silently hiding the other Section.
+    // Collapse same-cell, same-meeting blocks (same day/time/room/subject)
+    // into a single block whose Section reads as "BSIT-1A/BSIT-1B" —
+    // same slash-joined convention as the "Merge" indicator below —
+    // rather than losing one Section's half of the class entirely.
+    const mergedBlocks = [];
+    const seen = new Map();
+    blocks.forEach((block) => {
+        const key = [block.day, block.startIndex, block.span, block.Room, block.Subject].join('|');
+        const existing = seen.get(key);
+        if (existing) {
+            const sections = existing.Section.split('/');
+            if (!sections.includes(block.Section)) {
+                existing.Section = `${existing.Section}/${block.Section}`;
+                existing.merged = true;
+            }
+            return;
+        }
+        const copy = { ...block };
+        seen.set(key, copy);
+        mergedBlocks.push(copy);
+    });
+
+    return mergedBlocks;
 });
 
 const gridBlockAt = (day, rowIndex) => gridBlocks.value.find((b) => b.day === day && b.startIndex === rowIndex);
 const gridIsCovered = (day, rowIndex) => gridBlocks.value.some((b) => b.day === day && rowIndex > b.startIndex && rowIndex < b.startIndex + b.span);
+// Online meetings get their own colour (sky blue) so they read as
+// distinct from Face-to-Face blocks (emerald) at a glance — same
+// convention as the Section/Room scheduling grid's Online chips.
+const gridBlockIsOnline = (block) => block?.Room === 'Online';
 
 // Grid cell label: Room report shows Subject/Section/Faculty; Faculty
 // report shows Subject/Section/Room — whichever the row doesn't already
@@ -463,7 +509,11 @@ function gridCellLabel(row) {
     if (reportType.value === 'schedule_by_room') {
         return { line1: row.Subject, line2: row.Section, line3: row.Faculty };
     }
-    return { line1: row.Subject, line2: row.Section, line3: row.Room };
+    // A merged block (see gridBlocks' collapse step) rides two Sections
+    // in one cell — "/Merge" appended to the third line flags that at a
+    // glance without losing the Room/Online info that line already
+    // carries, e.g. "Online/Merge" or "Room 306 (Lab 1)/Merge".
+    return { line1: row.Subject, line2: row.Section, line3: row.merged ? `${row.Room}/Merge` : row.Room };
 }
 const needsSection = computed(() => ['schedule_by_section', 'section_subjects'].includes(reportType.value));
 // Major / Year Level / Section Type only matter for reports scoped to a
@@ -877,11 +927,11 @@ const summaryCards = computed(() => [
                                     <div
                                         v-if="gridBlockAt(day, rowIndex)"
                                         class="absolute inset-0.5 overflow-hidden rounded-md px-2 py-1 text-[11px] leading-tight"
-                                        :class="isDark ? 'bg-emerald-500/10' : 'bg-emerald-50'"
+                                        :class="gridBlockIsOnline(gridBlockAt(day, rowIndex)) ? (isDark ? 'bg-sky-500/10' : 'bg-sky-50') : (isDark ? 'bg-emerald-500/10' : 'bg-emerald-50')"
                                     >
-                                        <p class="truncate font-semibold" :class="isDark ? 'text-emerald-300' : 'text-emerald-700'">{{ gridCellLabel(gridBlockAt(day, rowIndex)).line1 }}</p>
+                                        <p class="truncate font-semibold" :class="gridBlockIsOnline(gridBlockAt(day, rowIndex)) ? (isDark ? 'text-sky-300' : 'text-sky-700') : (isDark ? 'text-emerald-300' : 'text-emerald-700')">{{ gridCellLabel(gridBlockAt(day, rowIndex)).line1 }}</p>
                                         <p class="truncate" :class="isDark ? 'text-slate-400' : 'text-slate-500'">{{ gridCellLabel(gridBlockAt(day, rowIndex)).line2 }}</p>
-                                        <p class="truncate text-[10px]" :class="isDark ? 'text-slate-500' : 'text-slate-400'">{{ gridCellLabel(gridBlockAt(day, rowIndex)).line3 }}</p>
+                                        <p class="truncate text-[10px]" :class="gridBlockIsOnline(gridBlockAt(day, rowIndex)) ? (isDark ? 'text-sky-400' : 'text-sky-600') : (isDark ? 'text-slate-500' : 'text-slate-400')">{{ gridCellLabel(gridBlockAt(day, rowIndex)).line3 }}</p>
                                     </div>
                                 </div>
                             </template>

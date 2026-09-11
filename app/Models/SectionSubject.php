@@ -268,7 +268,7 @@ class SectionSubject extends Model
             return null;
         }
 
-        $this->loadMissing(['subject.major.department', 'faculty.subjects']);
+        $this->loadMissing(['subject.major.department', 'faculty.subjects', 'faculty.college']);
 
         $subject = $this->subject;
         $faculty = $this->faculty;
@@ -283,8 +283,11 @@ class SectionSubject extends Model
 
         $subjectCollegeId = $subject->major?->department?->college_id;
 
+        // Mirrors RecommendationService's GenEd pool: "no College" OR a
+        // College that has opted in via counts_as_gened (e.g. College
+        // of Teacher Education supplying most GenEd/Minor faculty).
         $isHomeMatch = $subjectCollegeId === null
-            ? $faculty->college_id === null
+            ? ($faculty->college_id === null || (bool) $faculty->college?->counts_as_gened)
             : $faculty->college_id === $subjectCollegeId;
 
         return ! $isHomeMatch;

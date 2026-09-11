@@ -52,6 +52,17 @@ async function markAllRead() {
     router.reload({ only: ['notifications'] });
 }
 
+// Bulk counterpart to the per-row delete button — same "only
+// already-read notifications can go" rule, enforced server-side too
+// (see NotificationController::destroyAllRead()), so unread items are
+// left untouched no matter what.
+async function deleteAllRead() {
+    if (! confirm('Delete all read notifications? This cannot be undone.')) return;
+
+    await axios.delete(route('notifications.destroy-all-read'));
+    router.reload({ only: ['notifications'] });
+}
+
 // Only already-read notifications can be deleted (see
 // NotificationController::destroy()) — an unread one is still
 // something the recipient hasn't seen yet.
@@ -70,7 +81,10 @@ async function deleteNotification(notification) {
         <div class="mx-auto max-w-3xl px-4 py-6">
             <div class="mb-4 flex items-center justify-between">
                 <h1 class="text-xl font-bold text-slate-800 dark:text-white">Notifications</h1>
-                <Button label="Mark all read" size="small" severity="secondary" outlined @click="markAllRead" />
+                <div class="flex gap-2">
+                    <Button label="Mark all read" size="small" severity="secondary" outlined @click="markAllRead" />
+                    <Button label="Delete all read" size="small" severity="danger" outlined @click="deleteAllRead" />
+                </div>
             </div>
 
             <div class="mb-4 flex gap-2">

@@ -576,9 +576,22 @@ class DashboardService
      * hours_confirmed=true (falls back to 3 hrs/week when the Subject
      * declares none, matching RecommendationService's own fallback).
      *
+     * SPLIT-DELIVERY SCHEDULING — a Face-to-Face/Online split (e.g. 3
+     * hrs/week in-room + 2 hrs/week Online, same Section+Subject) is
+     * saved as TWO SectionSubject rows. Judging each row against the
+     * Subject's full weekly requirement on its own used to flag both
+     * halves as a mismatch even though they correctly add up together
+     * — same "one class, split across rows" grouping rule used
+     * elsewhere (e.g. FacultyWorkloadService::assignedPlacements()).
+     * Rows are grouped by section_id+subject_id and their hours summed
+     * before comparing against the requirement, so a correctly-split
+     * schedule is no longer flagged.
+     *
      * A row already confirmed (hours_confirmed=true, persisted at
      * save time) is excluded — see roomTypeMismatchDetails()'s
-     * docblock above for why.
+     * docblock above for why. For a split pair, ANY row in the group
+     * being confirmed is enough to exclude the whole group, since the
+     * Registrar reviewed the combined schedule as one unit.
      *
      * @param  Collection<int, SectionSubject>  $placements
      * @return list<array<string, mixed>>
@@ -586,18 +599,24 @@ class DashboardService
     private function hoursMismatchDetails(Collection $placements): array
     {
         return $placements
-            ->filter(fn (SectionSubject $p) => $p->subject !== null && ! $p->hours_confirmed)
-            ->map(function (SectionSubject $p) {
-                $dayTokens = array_values(array_filter(explode(',', (string) $p->days)));
-                $requiredHours = ((int) $p->subject->lecture_hours) + ((int) $p->subject->laboratory_hours);
+            ->filter(fn (SectionSubject $p) => $p->subject !== null)
+            ->groupBy(fn (SectionSubject $p) => $p->section_id.'-'.$p->subject_id)
+            ->filter(fn (Collection $group) => $group->every(fn (SectionSubject $p) => ! $p->hours_confirmed))
+            ->map(function (Collection $group) {
+                $primary = $group->first();
+                $requiredHours = ((int) $primary->subject->lecture_hours) + ((int) $primary->subject->laboratory_hours);
                 if ($requiredHours <= 0) {
                     $requiredHours = 3;
                 }
 
-                $actualMinutes = (strtotime($p->end_time) - strtotime($p->start_time)) / 60 * count($dayTokens);
+                $actualMinutes = $group->sum(function (SectionSubject $p) {
+                    $dayTokens = array_values(array_filter(explode(',', (string) $p->days)));
+
+                    return (strtotime($p->end_time) - strtotime($p->start_time)) / 60 * count($dayTokens);
+                });
                 $actualHours = round($actualMinutes / 60, 2);
 
-                return [$p, $requiredHours, $actualHours];
+                return [$primary, $requiredHours, $actualHours];
             })
             ->filter(fn (array $row) => $row[2] !== (float) $row[1])
             ->map(function (array $row) {

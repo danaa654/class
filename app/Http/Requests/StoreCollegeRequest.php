@@ -28,6 +28,7 @@ class StoreCollegeRequest extends FormRequest
             'short_name' => ['nullable', 'string', 'max:100'],
             'description' => ['nullable', 'string'],
             'status' => ['required', Rule::in(['Active', 'Inactive'])],
+            'counts_as_gened' => ['sometimes', 'boolean'],
         ];
     }
 }

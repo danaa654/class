@@ -1,14 +1,22 @@
 <script setup>
-import { Head, Link } from '@inertiajs/vue3';
-import { computed } from 'vue';
+import { Head, Link, useForm, usePage } from '@inertiajs/vue3';
+import { computed, ref } from 'vue';
 import AppLayout from '@/Layouts/AppLayout.vue';
 import ProgressBar from 'primevue/progressbar';
 import Tag from 'primevue/tag';
+import Dialog from 'primevue/dialog';
+import InputNumber from 'primevue/inputnumber';
+import Button from 'primevue/button';
+import Toast from 'primevue/toast';
+import { useToast } from 'primevue/usetoast';
 import InfoPopover from '@/Components/InfoPopover.vue';
 import { useTheme } from '@/composables/useTheme';
 
 const { theme } = useTheme();
 const isDark = computed(() => theme.value === 'dark');
+const page = usePage();
+const toast = useToast();
+const canChangeMaxLoad = computed(() => !!page.props.auth?.can?.changeFacultyMaxLoad);
 
 const props = defineProps({
     activeTerm: { type: Object, default: null },
@@ -24,6 +32,43 @@ const termLabel = computed(() => {
     if (!props.activeTerm) return 'No Active Academic Term';
     return `${props.activeTerm.school_year} | ${props.activeTerm.semester}`;
 });
+
+// ADD UNITS — quick edit of a faculty member's load ceiling right from
+// the Faculty Utilization widget, instead of navigating to their full
+// Faculty Details page just to change one number. Posts to the same
+// changeMaxLoad-gated endpoint the Faculty Details page uses, so the
+// Registrar sees the exact same cap/authorization rules here.
+const addUnitsDialogVisible = ref(false);
+const addUnitsTarget = ref(null);
+const addUnitsForm = useForm({ value: 0 });
+
+const openAddUnits = (faculty) => {
+    addUnitsTarget.value = faculty;
+    addUnitsForm.clearErrors();
+    addUnitsForm.value = faculty.max;
+    addUnitsDialogVisible.value = true;
+};
+
+const closeAddUnits = () => {
+    addUnitsDialogVisible.value = false;
+    addUnitsTarget.value = null;
+    addUnitsForm.clearErrors();
+};
+
+const submitAddUnits = () => {
+    if (!addUnitsTarget.value) return;
+
+    addUnitsForm.patch(route('scheduling.faculty.max-load.update', addUnitsTarget.value.id), {
+        preserveScroll: true,
+        onSuccess: () => {
+            toast.add({ severity: 'success', summary: 'Updated', detail: `${addUnitsTarget.value.name}'s maximum load was updated.`, life: 2500 });
+            closeAddUnits();
+        },
+        onError: () => {
+            toast.add({ severity: 'warn', summary: 'Could not update', detail: 'Please check the value and try again.', life: 3000 });
+        },
+    });
+};
 
 const alertItems = computed(() => {
     const items = [];
@@ -253,7 +298,17 @@ const quickActions = [
                     <div v-for="f in topFaculty" :key="f.name" class="mt-4 first:mt-4">
                         <div class="mb-1 flex items-center justify-between text-sm">
                             <span class="font-medium" :class="isDark ? 'text-slate-300' : 'text-slate-700'">{{ f.name }}</span>
-                            <span :class="isDark ? 'text-slate-400' : 'text-slate-500'">{{ f.units }} / {{ f.max }}</span>
+                            <span class="flex items-center gap-2">
+                                <span :class="isDark ? 'text-slate-400' : 'text-slate-500'">{{ f.units }} / {{ f.max }}</span>
+                                <Button
+                                    v-if="canChangeMaxLoad"
+                                    label="Add Units"
+                                    text
+                                    size="small"
+                                    class="!p-0 !text-xs !h-auto"
+                                    @click="openAddUnits(f)"
+                                />
+                            </span>
                         </div>
                         <ProgressBar
                             :value="f.max ? Math.min(100, (f.units / f.max) * 100) : 0"
@@ -338,5 +393,37 @@ const quickActions = [
                 </div>
             </div>
         </div>
+
+        <!-- Add Units dialog -->
+        <Dialog
+            v-model:visible="addUnitsDialogVisible"
+            modal
+            :header="addUnitsTarget ? `Update ${addUnitsTarget.name}'s Maximum Load` : 'Update Maximum Load'"
+            :style="{ width: '26rem' }"
+        >
+            <div class="flex flex-col gap-3">
+                <p class="text-sm" :class="isDark ? 'text-slate-300' : 'text-slate-600'">
+                    Current load: {{ addUnitsTarget?.units }} {{ addUnitsTarget?.unit_label ?? 'Units' }}
+                </p>
+                <label for="addUnitsValue" class="text-sm font-medium" :class="isDark ? 'text-slate-200' : 'text-[#1E293B]'">
+                    Maximum {{ addUnitsTarget?.unit_label ?? 'Units' }}
+                </label>
+                <InputNumber
+                    inputId="addUnitsValue"
+                    v-model="addUnitsForm.value"
+                    :min="0"
+                    showButtons
+                    class="w-full"
+                    :invalid="!!addUnitsForm.errors.value"
+                />
+                <small v-if="addUnitsForm.errors.value" class="text-red-500">{{ addUnitsForm.errors.value }}</small>
+            </div>
+            <template #footer>
+                <Button label="Cancel" text severity="secondary" :disabled="addUnitsForm.processing" @click="closeAddUnits" />
+                <Button label="Save" icon="pi pi-check" :loading="addUnitsForm.processing" @click="submitAddUnits" />
+            </template>
+        </Dialog>
+
+        <Toast />
     </AppLayout>
 </template>

@@ -64,6 +64,7 @@ class SettingsService
             // OVERLOADED_THRESHOLD as *editable* defaults. The service
             // constants remain the fallback if no setting is saved yet.
             'workload.max_teaching_load' => ['group' => 'workload', 'type' => 'int', 'default' => 24],
+            'workload.max_daily_teaching_hours' => ['group' => 'workload', 'type' => 'int', 'default' => 8],
             'workload.warning_threshold' => ['group' => 'workload', 'type' => 'int', 'default' => 85],
             'workload.overloaded_threshold' => ['group' => 'workload', 'type' => 'int', 'default' => 100],
             'workload.allow_admin_override' => ['group' => 'workload', 'type' => 'bool', 'default' => true],

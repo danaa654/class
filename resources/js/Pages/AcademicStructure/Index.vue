@@ -20,6 +20,7 @@ import Tag from 'primevue/tag';
 import Dialog from 'primevue/dialog';
 import Select from 'primevue/select';
 import FloatLabel from 'primevue/floatlabel';
+import Checkbox from 'primevue/checkbox';
 import Toast from 'primevue/toast';
 import InfoPopover from '@/Components/InfoPopover.vue';
 import { useTheme } from '@/composables/useTheme';
@@ -116,6 +117,7 @@ const collegeForm = useForm({
     short_name: '',
     description: '',
     status: 'Active',
+    counts_as_gened: false,
 });
 
 const openAddCollege = () => {
@@ -135,6 +137,7 @@ const openEditCollege = (college) => {
     collegeForm.short_name = college.short_name ?? '';
     collegeForm.description = college.description ?? '';
     collegeForm.status = college.status;
+    collegeForm.counts_as_gened = !!college.counts_as_gened;
     collegeDialogVisible.value = true;
 };
 
@@ -782,6 +785,16 @@ const onForceDeleteMajor = (major) => {
                                             />
                                         </template>
                                     </Column>
+                                    <Column field="counts_as_gened" header="GenEd Provider" style="width: 10rem">
+                                        <template #body="{ data }">
+                                            <Tag
+                                                v-if="data.counts_as_gened"
+                                                value="Yes"
+                                                severity="info"
+                                            />
+                                            <span v-else class="text-xs opacity-60">—</span>
+                                        </template>
+                                    </Column>
                                     <Column header="Actions" style="width: 13rem">
                                         <template #body="{ data }">
                                             <div class="flex gap-1">
@@ -1216,6 +1229,21 @@ const onForceDeleteMajor = (major) => {
                         <label for="collegeDescription">Description</label>
                     </FloatLabel>
                     <small v-if="collegeForm.errors.description" class="text-red-500 -mt-4">{{ collegeForm.errors.description }}</small>
+                </div>
+
+                <!-- Counts as GenEd provider -->
+                <div class="flex items-start gap-2 mt-5">
+                    <Checkbox
+                        v-model="collegeForm.counts_as_gened"
+                        inputId="collegeCountsAsGened"
+                        binary
+                    />
+                    <label for="collegeCountsAsGened" class="text-sm" :class="isDark ? 'text-slate-200' : 'text-[#1E293B]'">
+                        Counts as General Education provider
+                        <span class="block text-xs opacity-70">
+                            Faculty in this College will also be recommended and matched for General Education / Minor subjects, in addition to their own College's subjects.
+                        </span>
+                    </label>
                 </div>
             </form>
 

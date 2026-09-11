@@ -108,8 +108,21 @@ class SectionSubjectController extends Controller implements HasMiddleware
      * Administrator may explicitly "Override & Save" it. Hard
      * conflicts can never be overridden; this can, and only by an
      * Administrator (see UsersController's use of the same role gate).
+     *
+     * SPLIT-DELIVERY SCHEDULING — $row is the SectionSubject actually
+     * being saved. When it's one half of a Face-to-Face/Online split
+     * pair (same section_id+subject_id, different `component` — see
+     * SectionSubject::isSplitComponent()), its sibling row is excluded
+     * from the "current load" lookup alongside $row itself. Otherwise
+     * FacultyWorkloadService::currentLoad() would still count the
+     * sibling's placement AND this call's own `additional` would add
+     * the Subject's full units again — double-charging a single
+     * 3-unit Subject as 6 units just because it's delivered across two
+     * rows. Excluding both and adding the Subject's units back once
+     * (via `additional`) prices the pair correctly regardless of which
+     * half is saved first.
      */
-    private function workloadWarningFor(?int $facultyId, ?\App\Models\Subject $subject, int $excludingId): ?array
+    private function workloadWarningFor(?int $facultyId, ?\App\Models\Subject $subject, SectionSubject $row): ?array
     {
         if (! $facultyId || ! $subject) {
             return null;
@@ -120,7 +133,15 @@ class SectionSubjectController extends Controller implements HasMiddleware
             return null;
         }
 
-        $evaluation = $this->workloadService->evaluate($faculty, $subject, $excludingId);
+        $excludingIds = SectionSubject::query()
+            ->where('section_id', $row->section_id)
+            ->where('subject_id', $row->subject_id)
+            ->pluck('id')
+            ->push($row->id)
+            ->unique()
+            ->all();
+
+        $evaluation = $this->workloadService->evaluate($faculty, $subject, $excludingIds);
 
         if (! $evaluation['exceeds']) {
             return null;
@@ -295,6 +316,26 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // that left BOTH rows non-null but disagreeing, which the old
         // whereNull() filter here never caught. Now corrects that case
         // on every page load too, not just a blank Online row.
+        //
+        // CONFLICT-SAFE SYNC — this self-heal used to
+        // forceFill()->save() the inherited Faculty unconditionally,
+        // completely bypassing ScheduleConflictService. An Online row
+        // already carries its own Days/Start/End Time (unlike a
+        // brand-new split half), so blindly swapping its Faculty here
+        // can silently double-book that inherited Faculty against
+        // whatever ELSE they teach at that same Day/Time in another
+        // Section — a real Faculty conflict created by a page load,
+        // never surfaced anywhere, and never caught by the "Save
+        // Schedule"/manual-edit conflict checks because no save
+        // request was ever made for the Online row itself. Now the
+        // same findFacultyConflict() check every manual save already
+        // goes through runs here first: a clean inheritance still
+        // self-heals exactly as before; one that would create a
+        // Faculty double-booking is left alone (Faculty NOT swapped)
+        // and the row is flagged 'Conflict' instead, so it surfaces on
+        // the Sections list / Scheduling Dashboard's "Needs Attention"
+        // indicator for the Registrar to resolve by hand (re-time or
+        // reassign) rather than being silently created.
         $facultyBySubjectId = $sectionSubjects
             ->where('delivery_mode', 'face_to_face')
             ->whereNotNull('faculty_id')
@@ -305,7 +346,61 @@ class SectionSubjectController extends Controller implements HasMiddleware
             ->each(function (SectionSubject $onlineRow) use ($facultyBySubjectId) {
                 $facultyId = $facultyBySubjectId->get($onlineRow->subject_id);
 
-                if ($facultyId && $onlineRow->faculty_id !== $facultyId) {
+                if (! $facultyId) {
+                    return;
+                }
+
+                $dayTokens = array_filter(explode(',', (string) $onlineRow->days));
+                $hasWindow = ! empty($dayTokens) && $onlineRow->start_time && $onlineRow->end_time;
+
+                // Checked whenever this row already has (or would end
+                // up with) the inherited Faculty AND its own Day/Time
+                // window — covers both a fresh drift about to be
+                // synced below, and a pair that was already
+                // (unsafely) synced by an older build of this method
+                // before this check existed, which otherwise would
+                // never get re-evaluated once faculty_id already
+                // matches.
+                // FIX (merged-row false positive): must exclude the
+                // FULL merge group (self + host + riders), exactly
+                // like every other write path does via
+                // mergeExclusionIds() — not just $onlineRow->id. A
+                // merged Online row is DELIBERATELY sharing its
+                // Faculty/Day/Time with its merge partner in another
+                // Section (that overlap is the entire point of the
+                // merge — see mergeExclusionIds()'s docblock), so
+                // excluding only itself made this self-heal re-detect
+                // that intentional overlap as a fresh 'Conflict' on
+                // every single page load/refresh, immediately undoing
+                // whatever clean 'Scheduled' status Save Schedule had
+                // just set (Save Schedule already calls
+                // mergeExclusionIds() and never saw a conflict here).
+                $conflict = $hasWindow
+                    ? $this->conflictService->findFacultyConflict(
+                        $facultyId,
+                        $this->conflictService->mergeExclusionIds($onlineRow),
+                        $dayTokens,
+                        $onlineRow->start_time,
+                        $onlineRow->end_time,
+                        $onlineRow->section_id
+                    )
+                    : null;
+
+                if ($conflict) {
+                    if ($onlineRow->status !== 'Conflict') {
+                        $onlineRow->forceFill(['status' => 'Conflict'])->save();
+                    }
+
+                    return;
+                }
+
+                // No conflict — proceed with the normal same-faculty
+                // sync. Deliberately never clears an existing
+                // 'Conflict' status here: that status may have been
+                // set for a different reason entirely (Room/Section
+                // conflict, etc.), and this method only ever knows
+                // about the one Faculty-overlap case it just checked.
+                if ($onlineRow->faculty_id !== $facultyId) {
                     $onlineRow->forceFill(['faculty_id' => $facultyId])->save();
                     $onlineRow->setRelation('faculty', $onlineRow->faculty()->first());
                 }
@@ -381,7 +476,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
         $activeFaculty = function () {
             $activeFacultyList = Faculty::query()
                 ->where('status', 'Active')
-                ->with(['subjects:id', 'college:id,name,short_name'])
+                ->with(['subjects:id', 'college:id,name,short_name,counts_as_gened'])
                 ->orderBy('last_name')
                 ->orderBy('first_name')
                 ->get(['id', 'first_name', 'middle_name', 'last_name', 'suffix', 'college_id', 'max_teaching_units']);
@@ -404,6 +499,15 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 // Active Faculty" bucket regardless of College).
                 'college_id' => $faculty->college_id,
                 'college_name' => $faculty->college?->short_name ?? $faculty->college?->name ?? 'General Education',
+                // Whether this Faculty's own College has opted in as a
+                // General Education/Minor faculty pool (e.g. College of
+                // Teacher Education) — sent so the Show.vue's
+                // isQualifiedFor() (Faculty dropdown grouping + the
+                // client-side "Scheduling Issues" panel) can mirror
+                // SectionSubject::getFacultyMismatchAttribute()'s
+                // counts_as_gened branch exactly instead of only ever
+                // recognizing a null college_id as GenEd-eligible.
+                'college_counts_as_gened' => (bool) $faculty->college?->counts_as_gened,
                 // Teaching Load, same source (FacultyWorkloadService)
                 // the recommendation ranking and Save Schedule's
                 // workload guard already use — shown next to every
@@ -821,9 +925,14 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 $candidateFaculty->loadMissing('subjects:id');
                 $isQualified = $candidateFaculty->subjects->contains('id', $subject->subject->id);
                 if (! $isQualified) {
+                    $candidateFaculty->loadMissing('college');
                     $subjectCollegeId = $subject->subject->major?->department?->college_id;
+                    // Mirrors SectionSubject::getFacultyMismatchAttribute()'s
+                    // GenEd pool: "no College" OR a College that has opted
+                    // in via counts_as_gened (e.g. College of Teacher
+                    // Education supplying most GenEd/Minor faculty).
                     $isHomeMatch = $subjectCollegeId === null
-                        ? $candidateFaculty->college_id === null
+                        ? ($candidateFaculty->college_id === null || (bool) $candidateFaculty->college?->counts_as_gened)
                         : $candidateFaculty->college_id === $subjectCollegeId;
 
                     if (! $isHomeMatch) {
@@ -900,7 +1009,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // raising the cap itself are the same underlying trust
         // decision, so a role that already holds one shouldn't be
         // blocked from the other.
-        $workloadWarning = $this->workloadWarningFor($facultyId, $subject->subject, $subject->id);
+        $workloadWarning = $this->workloadWarningFor($facultyId, $subject->subject, $subject);
 
         if ($workloadWarning) {
             $canOverride = (bool) $request->user()?->can('changeMaxLoad', Faculty::class);
@@ -1459,6 +1568,31 @@ class SectionSubjectController extends Controller implements HasMiddleware
                     'faculty_id' => $faculty->id,
                     'auto_generated_meta' => $meta,
                 ]);
+
+                // SPLIT-DELIVERY SAFE SYNC — mirrors
+                // AutoScheduleService::resyncSplitFacultyPairs(). That
+                // resync only runs at the end of a full Auto Generate
+                // run, but this endpoint is what actually fires when
+                // an Administrator edits the Faculty dropdown on a
+                // Face-to-Face row INSIDE the "Auto Schedule Complete"
+                // review panel, before ever clicking Accept All &
+                // Save — so without this, overriding Face-to-Face's
+                // Faculty here silently leaves its Online sibling
+                // pointed at whichever Faculty Auto Generate originally
+                // picked, splitting one Subject across two different
+                // instructors. Face-to-Face stays the authoritative
+                // half (same convention as the batch resync), so only
+                // a Face-to-Face override ever propagates — an edit
+                // made directly on an Online row here never pushes
+                // back onto its Face-to-Face sibling.
+                if ($subject->delivery_mode === 'face_to_face') {
+                    SectionSubject::query()
+                        ->where('section_id', $subject->section_id)
+                        ->where('subject_id', $subject->subject_id)
+                        ->where('delivery_mode', 'online')
+                        ->where('faculty_id', '!=', $faculty->id)
+                        ->update(['faculty_id' => $faculty->id]);
+                }
             });
         } catch (ScheduleConflictAbort $abort) {
             return response()->json([
@@ -2166,15 +2300,45 @@ class SectionSubjectController extends Controller implements HasMiddleware
             $subject
         );
 
-        $singleDay = $this->recommendationService->recommendSingleDaySlots(
-            $subject->subject,
-            $subject->section,
-            $subject->faculty_id,
-            $subject->room_id,
-            $subject,
-            $sessionMinutes,
-            $excludeDays
-        );
+        // SINGLE-DAY SLOTS ARE A "FIX ONE OCCURRENCE" TOOL, NOT A
+        // "SCHEDULE FROM SCRATCH" TOOL — recommendSingleDaySlots()
+        // returns fragments sized to ONE meeting of the Subject's
+        // pattern (e.g. a single 1h slot for a Subject that meets
+        // twice a week for 1h each). That's exactly right when the
+        // Registrar is replacing one already-scheduled occurrence
+        // (the row has other Days already set, passed here via
+        // exclude_days), but wrong for a still-fully-unscheduled row:
+        // merging those fragments in let a lone 1h "Fri" suggestion
+        // outscore and outrank the full 2-meeting pattern, and
+        // clicking it silently left the Subject scheduled for only
+        // half its required weekly hours. Only search single-day
+        // slots once this row already has at least one real meeting
+        // to patch around.
+        $singleDay = ['recommendations' => [], 'message' => null];
+
+        if (! empty($excludeDays)) {
+            $singleDay = $this->recommendationService->recommendSingleDaySlots(
+                $subject->subject,
+                $subject->section,
+                $subject->faculty_id,
+                $subject->room_id,
+                $subject,
+                $sessionMinutes,
+                $excludeDays
+            );
+        }
+
+        // SHARED ONLINE SESSION SUGGESTIONS — kept as a separate list
+        // from $recommendations rather than merged/scored alongside
+        // them: this isn't "a good conflict-free time slot", it's "an
+        // entirely different action" (ride along on another Section's
+        // already-scheduled class instead of booking a new one), and
+        // it only ever makes sense for a still-unscheduled Online row
+        // (room_id null) — never for a row being fixed in place with
+        // a Room already assigned.
+        $mergeSuggestions = $subject->room_id === null
+            ? $this->recommendationService->findOnlineMergeCandidates($subject)
+            : [];
 
         $recommendations = array_merge($multiDay['recommendations'], $singleDay['recommendations']);
 
@@ -2202,6 +2366,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
         return response()->json([
             'recommendations' => $recommendations,
             'message' => empty($recommendations) ? $message : null,
+            'merge_suggestions' => $mergeSuggestions,
             'preferred_days' => $preferredDays,
             'current' => [
                 'days' => array_values(array_filter(explode(',', (string) $subject->days))),
@@ -2740,9 +2905,13 @@ class SectionSubjectController extends Controller implements HasMiddleware
                         $candidateFaculty->loadMissing('subjects:id');
                         $isQualified = $candidateFaculty->subjects->contains('id', $subject->subject->id);
                         if (! $isQualified) {
+                            $candidateFaculty->loadMissing('college');
                             $subjectCollegeId = $subject->subject->major?->department?->college_id;
+                            // Mirrors SectionSubject::getFacultyMismatchAttribute()'s
+                            // GenEd pool: "no College" OR a College that has
+                            // opted in via counts_as_gened.
                             $isHomeMatch = $subjectCollegeId === null
-                                ? $candidateFaculty->college_id === null
+                                ? ($candidateFaculty->college_id === null || (bool) $candidateFaculty->college?->counts_as_gened)
                                 : $candidateFaculty->college_id === $subjectCollegeId;
 
                             if (! $isHomeMatch) {
@@ -2831,7 +3000,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 // Save" — so it's tracked separately and only blocks
                 // the row when nobody has confirmed it (or the
                 // confirming user doesn't hold changeMaxLoad).
-                $workloadWarning = $this->workloadWarningFor($facultyId, $subject->subject, $subject->id);
+                $workloadWarning = $this->workloadWarningFor($facultyId, $subject->subject, $subject);
                 $isWorkloadOverride = false;
 
                 if ($workloadWarning) {

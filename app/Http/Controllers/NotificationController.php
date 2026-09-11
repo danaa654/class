@@ -150,6 +150,23 @@ class NotificationController extends Controller
         return $route ? redirect($route) : redirect()->route('scheduling.sections');
     }
 
+    /**
+     * Delete every already-read notification for this user in one go
+     * — the "Delete All" counterpart to Mark All Read. Same "read
+     * before it can go away" rule as destroy(): unread notifications
+     * are left untouched so nothing the recipient hasn't seen yet
+     * silently disappears.
+     */
+    public function destroyAllRead(Request $request): JsonResponse
+    {
+        $deleted = Notification::query()
+            ->where('recipient_user_id', $request->user()->id)
+            ->where('is_read', true)
+            ->delete();
+
+        return response()->json(['success' => true, 'deleted' => $deleted]);
+    }
+
     private function routeFor(Notification $notification): ?string
     {
         if ($notification->type === \App\Services\NotificationService::TYPE_FACULTY_LOAD_REQUEST_SUBMITTED

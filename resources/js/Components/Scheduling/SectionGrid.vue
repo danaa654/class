@@ -41,6 +41,7 @@ import { computed, ref } from 'vue';
 import { router } from '@inertiajs/vue3';
 import Button from 'primevue/button';
 import { useToast } from 'primevue/usetoast';
+import Swal from 'sweetalert2';
 
 const props = defineProps({
     section: { type: Object, required: true },
@@ -191,6 +192,92 @@ const requiredHours = (row) => {
 const saving = ref(false); // kept for potential future use; no longer drives a blocking UI
 const savingLabel = ref('');
 
+// Shared write path — both click/drag-to-cell (assignCell below) and
+// "Suggest a Time" (applySuggestion) end up here, so there's exactly
+// ONE place that talks to the schedule endpoint, rolls back on
+// failure, and reports errors. Takes the full resulting Day pattern
+// (not a single day) since a suggestion can be multi-day (e.g. MW) in
+// one shot, unlike a single cell click/drop.
+const writeSchedule = async (row, newDays, startTime, endTime, successMessage, extraPayload = {}) => {
+    const previous = { days: row.days, start_time: row.start_time, end_time: row.end_time };
+    Object.assign(row, { days: newDays, start_time: startTime, end_time: endTime });
+    selectedRow.value = null;
+
+    savingLabel.value = `Placing ${row.subject?.subject_code}…`;
+    try {
+        const { data } = await window.axios.patch(
+            route('scheduling.section-subjects.schedule', [props.section.id, row.id]),
+            { days: newDays, start_time: startTime, end_time: endTime, hours_confirmed: true, ...extraPayload },
+        );
+
+        emit('row-updated', data.sectionSubject ?? data.section_subject ?? data, data.schedule_version);
+        toast.add({ severity: 'success', summary: 'Scheduled', detail: successMessage, life: 2500 });
+        return true;
+    } catch (error) {
+        // Roll back the optimistic placement — the server didn't
+        // accept it (a real conflict, a validation error, etc.), so
+        // the block must not stay on screen looking scheduled.
+        Object.assign(row, previous);
+
+        const responseData = error.response?.data;
+
+        // WORKLOAD WARNING — mirrors RoomGrid.vue's writeSchedule()
+        // fix for the exact same pre-existing bug: this is its own
+        // 409 shape ({workload_warning, can_override, message} — no
+        // `errors` key), and the backend has supported an
+        // Administrator/Registrar/Dean/OIC/Assistant Dean override
+        // via workload_confirmed=true since this endpoint's very
+        // first version. Without this branch, that "Proceed anyway?"
+        // in the message text was a lie — there was no action that
+        // could ever say yes to it, so every legitimate override
+        // (e.g. merging an Online session onto an already-slightly-
+        // over-capacity Faculty member) dead-ended on a plain error
+        // toast no matter who clicked it.
+        if (error.response?.status === 409 && responseData?.workload_warning) {
+            if (responseData.can_override) {
+                const result = await Swal.fire({
+                    icon: 'warning',
+                    title: 'Conflict',
+                    text: responseData.message,
+                    showCancelButton: true,
+                    confirmButtonText: 'Proceed Anyway',
+                    cancelButtonText: 'Cancel',
+                });
+
+                if (result.isConfirmed) {
+                    return writeSchedule(row, newDays, startTime, endTime, successMessage, {
+                        ...extraPayload,
+                        workload_confirmed: true,
+                    });
+                }
+
+                return false;
+            }
+
+            toast.add({ severity: 'error', summary: 'Could not schedule', detail: responseData.message, life: 7000 });
+            return false;
+        }
+
+        // Mirrors RoomGrid.vue's exact fallback chain: a 422
+        // validation failure carries `errors` (Room/Hours/Capacity
+        // mismatch, etc.), but a 409 Faculty/Room/Section conflict
+        // warning carries only `message` — this grid was only ever
+        // checking `errors`, so every other 409 fell through to the
+        // generic "Something went wrong" text instead of showing the
+        // actual conflict (e.g. which faculty/room/section it
+        // collided with).
+        const message = responseData?.errors
+            ? Object.values(responseData.errors).flat().join(' ')
+            : (responseData?.message ?? 'Something went wrong placing this subject. Please try again.');
+        // Conflict messages (Faculty/Room/Section double-booking) can
+        // run long — give this one more time on screen than a
+        // typical error toast so it's actually readable before it
+        // disappears.
+        toast.add({ severity: 'error', summary: 'Could not schedule', detail: message, life: 7000 });
+        return false;
+    }
+};
+
 const assignCell = async (day, slotStart) => {
     if (!selectedRow.value) {
         toast.add({ severity: 'info', summary: 'Pick a subject first', detail: 'Click an unscheduled subject on the left, then click an open slot here.', life: 3000 });
@@ -216,47 +303,98 @@ const assignCell = async (day, slotStart) => {
         ? Array.from(new Set([...existingDays, day]))
         : [day];
 
-    // OPTIMISTIC UPDATE — mutate the row in place immediately so the
-    // block appears on the grid the instant you drop/click, same as
-    // Room Grid's drag feels instant against this exact endpoint.
-    // `row` is the same object reference held in the parent's `rows`
-    // array (passed straight through as a prop, never cloned), so
-    // this mutation is visible everywhere that array is rendered —
-    // this grid, the Subjects tab, Room Grid — before the network
-    // request even resolves. Snapshot the previous values first so a
-    // failed save can be rolled back cleanly instead of leaving a
-    // placement on screen the server rejected.
-    const previous = { days: row.days, start_time: row.start_time, end_time: row.end_time };
-    Object.assign(row, { days: newDays, start_time: toHHMM(slotStart), end_time: toHHMM(endMinutes) });
+    await writeSchedule(
+        row,
+        newDays,
+        toHHMM(slotStart),
+        toHHMM(endMinutes),
+        `${row.subject?.subject_code} placed on ${DAY_LABELS[day]} at ${to12Hour(toHHMM(slotStart))}.`,
+    );
+};
+
+// SUGGEST A TIME — for an unscheduled online row, ask
+// RecommendationService::recommendTimes() (the exact same conflict-
+// checked, scored engine Auto Generate/Room Grid's "Recommend Time"
+// already use) for the best conflict-free Day/Time pattern, checking
+// not just this grid's own Section availability but the assigned
+// Faculty's OTHER sections too — the one thing this grid could never
+// see on its own (see this file's header docblock). A candidate is
+// never applied silently: the Registrar sees the ranked picks and
+// clicks one.
+const suggestionsFor = ref(null); // row.id currently showing suggestions
+const suggestionResults = ref([]);
+const suggestionMessage = ref('');
+const suggestionsLoading = ref(false);
+// SHARED ONLINE SESSION — other Regular sections' already-scheduled
+// Online class for this same Subject (same Year Level, same Faculty
+// once one's picked) that this row could ride along on instead of
+// getting its own separate slot. See RecommendationService::
+// findOnlineMergeCandidates(). Kept in its own list, never mixed into
+// suggestionResults, since "merge onto an existing class" is a
+// different action than "book a new time".
+const mergeSuggestions = ref([]);
+
+const fetchSuggestions = async (row) => {
+    if (suggestionsFor.value === row.id) {
+        // Toggle off if already open for this row.
+        suggestionsFor.value = null;
+        return;
+    }
+
     selectedRow.value = null;
+    suggestionsFor.value = row.id;
+    suggestionResults.value = [];
+    mergeSuggestions.value = [];
+    suggestionMessage.value = '';
+    suggestionsLoading.value = true;
 
-    savingLabel.value = `Placing ${row.subject?.subject_code}…`;
     try {
-        const { data } = await window.axios.patch(
-            route('scheduling.section-subjects.schedule', [props.section.id, row.id]),
-            {
-                days: newDays,
-                start_time: toHHMM(slotStart),
-                end_time: toHHMM(endMinutes),
-                hours_confirmed: true,
-            },
+        const { data } = await window.axios.get(
+            route('scheduling.section-subjects.time-recommendations', [props.section.id, row.id]),
         );
-
-        emit('row-updated', data.sectionSubject ?? data.section_subject ?? data, data.schedule_version);
-        toast.add({ severity: 'success', summary: 'Scheduled', detail: `${row.subject?.subject_code} placed on ${DAY_LABELS[day]} at ${to12Hour(toHHMM(slotStart))}.`, life: 2500 });
+        suggestionResults.value = (data.recommendations ?? []).slice(0, 3);
+        mergeSuggestions.value = data.merge_suggestions ?? [];
+        suggestionMessage.value = data.message ?? (suggestionResults.value.length ? '' : 'No available time slot found without conflicts.');
     } catch (error) {
-        // Roll back the optimistic placement — the server didn't
-        // accept it (a real conflict, a validation error, etc.), so
-        // the block must not stay on screen looking scheduled.
-        Object.assign(row, previous);
-        const message = error.response?.data?.errors
-            ? Object.values(error.response.data.errors).flat().join(' ')
-            : 'Something went wrong placing this subject. Please try again.';
-        // Conflict messages (Faculty/Room/Section double-booking) can
-        // run long — give this one more time on screen than a
-        // typical error toast so it's actually readable before it
-        // disappears.
-        toast.add({ severity: 'error', summary: 'Could not schedule', detail: message, life: 7000 });
+        suggestionMessage.value = error.response?.data?.message ?? 'Could not load time suggestions. Please try again.';
+    } finally {
+        suggestionsLoading.value = false;
+    }
+};
+
+const applySuggestion = async (row, candidate) => {
+    const label = `${candidate.days.join('/')} ${to12Hour(candidate.start_time)}–${to12Hour(candidate.end_time)}`;
+    const ok = await writeSchedule(
+        row,
+        candidate.days,
+        candidate.start_time,
+        candidate.end_time,
+        `${row.subject?.subject_code} placed on ${label}.`,
+    );
+    if (ok) {
+        suggestionsFor.value = null;
+    }
+};
+
+// Apply a Shared Online Session — re-uses the exact same write path
+// as applySuggestion() above, just with the target class's own
+// Faculty/Days/Time plus merge_target_section_subject_id so the
+// backend re-validates and re-points this row onto that existing
+// class (SectionSubjectController::performScheduleAssignmentUpdate()
+// -> IrregularSectionMergeService::evaluateReversePlacement()) rather
+// than booking a brand-new slot.
+const applyMergeSuggestion = async (row, candidate) => {
+    const label = `${candidate.days.join('/')} ${to12Hour(candidate.start_time)}–${to12Hour(candidate.end_time)}`;
+    const ok = await writeSchedule(
+        row,
+        candidate.days,
+        candidate.start_time,
+        candidate.end_time,
+        `${row.subject?.subject_code} merged with ${candidate.section_code}'s class on ${label}.`,
+        { faculty_id: candidate.faculty_id, merge_target_section_subject_id: candidate.section_subject_id },
+    );
+    if (ok) {
+        suggestionsFor.value = null;
     }
 };
 
@@ -276,7 +414,11 @@ const removeFromGrid = async (row) => {
         emit('row-updated', data.sectionSubject ?? data.section_subject ?? data, data.schedule_version);
     } catch (error) {
         Object.assign(row, previous);
-        toast.add({ severity: 'error', summary: 'Could not remove', detail: 'Something went wrong. Please try again.', life: 4000 });
+        const responseData = error.response?.data;
+        const message = responseData?.errors
+            ? Object.values(responseData.errors).flat().join(' ')
+            : (responseData?.message ?? 'Something went wrong. Please try again.');
+        toast.add({ severity: 'error', summary: 'Could not remove', detail: message, life: 4000 });
     }
 };
 </script>
@@ -286,7 +428,7 @@ const removeFromGrid = async (row) => {
         <!-- LEFT SIDEBAR: Unscheduled subjects — same neu-inset card
              shape, legend-dot convention, and list-item styling as
              Room Grid's sidebars, so the two tabs read as one system. -->
-        <div class="w-full lg:w-40 shrink-0 neu-inset rounded-xl p-2.5">
+        <div class="w-full lg:w-56 shrink-0 neu-inset rounded-xl p-2.5">
             <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1.5">
                 Unscheduled ({{ unscheduledRows.length }})
             </p>
@@ -301,20 +443,84 @@ const removeFromGrid = async (row) => {
                 <li
                     v-for="row in unscheduledRows"
                     :key="row.id"
-                    draggable="true"
-                    class="rounded-md px-2 py-1.5 cursor-grab active:cursor-grabbing text-xs border transition-colors"
+                    class="rounded-md text-xs border transition-colors overflow-hidden"
                     :class="selectedRow?.id === row.id
                         ? (isDark ? 'bg-blue-500/20 border-blue-400/40 text-blue-300 font-medium' : 'bg-blue-50 border-blue-200 text-blue-700 font-medium')
-                        : (isDark ? 'border-l-4 border-l-sky-400 bg-sky-500/10 border-transparent hover:bg-white/5 text-slate-200' : 'border-l-4 border-l-sky-400 bg-sky-50/40 border-transparent hover:bg-slate-50 text-slate-700')"
-                    @click="selectForAssignment(row)"
-                    @dragstart="onDragStart($event, row)"
+                        : (isDark ? 'border-l-4 border-l-sky-400 bg-sky-500/10 border-transparent text-slate-200' : 'border-l-4 border-l-sky-400 bg-sky-50/40 border-transparent text-slate-700')"
                 >
-                    <div class="font-medium truncate flex items-center gap-1.5">
-                        <span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 bg-sky-400"></span>
-                        {{ row.subject?.subject_code }}
+                    <div
+                        draggable="true"
+                        class="px-2 py-1.5 cursor-grab active:cursor-grabbing hover:bg-black/5"
+                        @click="selectForAssignment(row)"
+                        @dragstart="onDragStart($event, row)"
+                    >
+                        <div class="font-medium truncate flex items-center gap-1.5">
+                            <span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 bg-sky-400"></span>
+                            {{ row.subject?.subject_code }}
+                        </div>
+                        <div class="text-[10px] truncate" :class="isDark ? 'text-slate-400' : 'text-slate-400'">{{ row.subject?.subject_title }}</div>
+                        <div class="text-[10px]" :class="isDark ? 'text-slate-400' : 'text-slate-400'">🌐 {{ requiredHours(row) }}h/week</div>
                     </div>
-                    <div class="text-[10px] truncate" :class="isDark ? 'text-slate-400' : 'text-slate-400'">{{ row.subject?.subject_title }}</div>
-                    <div class="text-[10px]" :class="isDark ? 'text-slate-400' : 'text-slate-400'">🌐 {{ requiredHours(row) }}h/week</div>
+
+                    <!-- SUGGEST A TIME — faculty-conflict-aware, unlike a
+                         plain click/drag onto this grid (see the file
+                         header docblock: this grid alone can't see a
+                         faculty's OTHER sections). -->
+                    <div class="px-2 pb-1.5">
+                        <Button
+                            :label="suggestionsFor === row.id ? 'Hide suggestions' : '✨ Suggest a Time'"
+                            text
+                            size="small"
+                            class="!text-[10px] !p-0 !h-auto"
+                            :loading="suggestionsLoading && suggestionsFor === row.id"
+                            @click.stop="fetchSuggestions(row)"
+                        />
+                    </div>
+
+                    <div
+                        v-if="suggestionsFor === row.id && !suggestionsLoading"
+                        class="px-2 pb-2 space-y-1"
+                    >
+                        <p v-if="suggestionMessage" class="text-[10px] italic" :class="isDark ? 'text-slate-400' : 'text-slate-500'">
+                            {{ suggestionMessage }}
+                        </p>
+                        <button
+                            v-for="(candidate, idx) in suggestionResults"
+                            :key="idx"
+                            type="button"
+                            class="w-full text-left rounded-md px-2 py-1 text-[10px] border transition-colors"
+                            :class="isDark ? 'border-white/10 bg-white/5 hover:bg-white/10 text-slate-200' : 'border-slate-200 bg-white hover:bg-blue-50 text-slate-700'"
+                            @click.stop="applySuggestion(row, candidate)"
+                        >
+                            <div class="flex items-center justify-between font-medium">
+                                <span>{{ candidate.days.join('/') }} · {{ to12Hour(candidate.start_time) }}–{{ to12Hour(candidate.end_time) }}</span>
+                                <span :class="isDark ? 'text-emerald-400' : 'text-emerald-600'">{{ candidate.score }}/{{ candidate.score_max }}</span>
+                            </div>
+                            <div class="opacity-70">No Faculty/Section conflict · click to use</div>
+                        </button>
+
+                        <!-- SHARED ONLINE SESSION — other Regular
+                             sections already holding this exact
+                             Subject Online, this row could ride
+                             along on instead of booking its own
+                             slot (see findOnlineMergeCandidates()). -->
+                        <template v-if="mergeSuggestions.length">
+                            <p class="text-[10px] font-semibold uppercase tracking-wide pt-1" :class="isDark ? 'text-emerald-400' : 'text-emerald-600'">
+                                Merge with an existing class
+                            </p>
+                            <button
+                                v-for="(candidate, idx) in mergeSuggestions"
+                                :key="`merge-${idx}`"
+                                type="button"
+                                class="w-full text-left rounded-md px-2 py-1 text-[10px] border transition-colors"
+                                :class="isDark ? 'border-emerald-400/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-slate-200' : 'border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-slate-700'"
+                                @click.stop="applyMergeSuggestion(row, candidate)"
+                            >
+                                <div class="font-medium">{{ candidate.section_code }} · {{ candidate.days.join('/') }} · {{ to12Hour(candidate.start_time) }}–{{ to12Hour(candidate.end_time) }}</div>
+                                <div class="opacity-70">{{ candidate.faculty_name }} · same class, no new slot</div>
+                            </button>
+                        </template>
+                    </div>
                 </li>
             </ul>
             <p v-if="selectedRow" class="text-[11px] mt-2.5" :class="isDark ? 'text-blue-400' : 'text-blue-500'">
@@ -417,6 +623,7 @@ const removeFromGrid = async (row) => {
                         >
                             <p class="font-semibold truncate">{{ row.subject?.subject_code }}</p>
                             <p class="truncate text-[10px] opacity-90">🏫 {{ row.room?.room_name ?? 'Room TBA' }}</p>
+                            <p class="truncate text-[10px] opacity-90">{{ row.faculty?.full_name ?? 'No faculty yet' }}</p>
                             <p class="truncate text-[10px] font-medium opacity-90">{{ to12Hour(row.start_time) }}–{{ to12Hour(row.end_time) }}</p>
                         </div>
                     </template>
@@ -435,6 +642,7 @@ const removeFromGrid = async (row) => {
                         >
                             <p class="font-semibold truncate">{{ row.subject?.subject_code }}</p>
                             <p class="truncate text-[10px] opacity-90">🌐 Online</p>
+                            <p class="truncate text-[10px] opacity-90">{{ row.faculty?.full_name ?? 'No faculty yet' }}</p>
                             <p class="truncate text-[10px] font-medium opacity-90">{{ to12Hour(row.start_time) }}–{{ to12Hour(row.end_time) }}</p>
                             <Button
                                 icon="pi pi-times"

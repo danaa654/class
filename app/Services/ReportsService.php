@@ -348,16 +348,26 @@ class ReportsService
     private function scheduleByFaculty(array $filters): array
     {
         $query = $this->sectionSubjectsQuery($filters)
-            // INTELLIGENT IRREGULAR SECTION SCHEDULING — same "one class
-            // session, one row" rule FacultyWorkloadService::assignedPlacements()
-            // already applies on the Faculty Workload tab: a merged
-            // Irregular-section row is the same session as its host row,
-            // just ridden along on by another Section, never a second
-            // class the faculty actually teaches. Excluding riders here
-            // and folding their Section Code into the host row (below)
-            // keeps this report's counts consistent with the Workload
-            // tab instead of double-listing/double-counting the class.
-            ->whereNull('merged_into_section_subject_id')
+            // FIX (cross-section merge visibility) — same fix already
+            // applied in FacultyWorkloadService::assignedPlacements():
+            // whereNull('merged_into_section_subject_id') used to be
+            // applied here too, which is fine for the "one Faculty, same
+            // Section family" Irregular-section case (the rider Section
+            // has no schedule of its own that would go missing), but
+            // breaks the moment two INDEPENDENT Sections (e.g. BSIT-1A
+            // and BSIT-1B) merge a shared Online slot: the rider row
+            // still belongs to ITS OWN Section (section_id is unchanged
+            // by merging — only merged_into_section_subject_id is set),
+            // so excluding it from the query dropped it from its own
+            // Section's group too, making that Section's printed/grid
+            // schedule silently miss its Online meeting even though the
+            // class still happens. Riders are no longer excluded —
+            // grouping below is keyed by faculty_id+section_id+subject_id,
+            // so a rider simply reappears as an extra Schedule line
+            // inside its OWN Section's group, same as a normal
+            // Face-to-Face/Online split. This does not risk
+            // double-counting: host and rider always have different
+            // section_id, so they never land in the same group.
             ->with(['mergedPlacements.section:id,section_code', 'section.major.department.college'])
             // The College/Program filter on this report means "faculty
             // whose own home college/department is this one" — NOT

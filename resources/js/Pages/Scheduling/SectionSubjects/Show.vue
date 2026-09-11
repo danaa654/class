@@ -372,12 +372,18 @@ const isQualifiedFor = (faculty, subject) => {
     if (faculty.qualified_subject_ids.includes(subject.id)) return true;
     if (subject.category === 'General Education') {
         // General Education subjects are owned by General Education
-        // Faculty, i.e. faculty with no College of their own — same
-        // rule the backend's subjectCollegeId()/recommendFaculty()
-        // uses (a null owning-College routes to the college_id-null
-        // GenEd pool), so the client-side grouping never disagrees
-        // with what the recommendation engine considers eligible.
-        return faculty.faculty_category === 'General Education Faculty' || faculty.college_id === null;
+        // Faculty, i.e. faculty with no College of their own, OR a
+        // faculty whose own College has opted in via counts_as_gened
+        // (e.g. College of Teacher Education supplying most GenEd/
+        // Minor faculty) — same rule the backend's
+        // subjectCollegeId()/recommendFaculty() and
+        // SectionSubject::getFacultyMismatchAttribute() use, so the
+        // client-side grouping and "Scheduling Issues" panel never
+        // disagree with what the recommendation engine / server-side
+        // save validation consider eligible.
+        return faculty.faculty_category === 'General Education Faculty'
+            || faculty.college_id === null
+            || Boolean(faculty.college_counts_as_gened);
     }
     // Major/Minor subjects fall back to a College match: a BSIT
     // (Major) subject is offered by the College of Computer Studies,
@@ -2919,6 +2925,35 @@ const onFacultyOverride = (result, { faculty, overall_score }) => {
                 ...row.auto_generated_meta,
                 time: { ...row.auto_generated_meta.time, hard_conflict: false },
             };
+        }
+
+        // SPLIT-DELIVERY SAFE SYNC — mirrors the same propagation the
+        // faculty-override endpoint now does server-side: a
+        // Face-to-Face override's Faculty must also reflect instantly
+        // on its Online sibling row/result, or the review panel keeps
+        // showing the OLD Faculty on the Online half until a full
+        // refresh, even though the backend already fixed the
+        // underlying data. Face-to-Face stays authoritative — editing
+        // an Online row's Faculty (if that selector is ever shown for
+        // one) never pushes back onto Face-to-Face.
+        if (row.delivery_mode === 'face_to_face') {
+            const siblingRow = rows.value.find(
+                (r) => r.id !== row.id
+                    && r.section_id === row.section_id
+                    && r.subject_id === row.subject_id
+                    && r.delivery_mode === 'online',
+            );
+            if (siblingRow) {
+                siblingRow.faculty_id = faculty.id;
+                if (siblingRow.faculty) siblingRow.faculty = { ...siblingRow.faculty, id: faculty.id, full_name: faculty.name };
+            }
+
+            const siblingResult = autoSummary.value?.results?.find(
+                (r) => r.section_subject_id === siblingRow?.id,
+            );
+            if (siblingResult) {
+                siblingResult.faculty = { ...siblingResult.faculty, id: faculty.id, name: faculty.name };
+            }
         }
     }
 };

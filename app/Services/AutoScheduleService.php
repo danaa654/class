@@ -531,6 +531,30 @@ class AutoScheduleService
             }
         }
 
+        // RESPECT AN EXISTING MANUAL ASSIGNMENT — if the Registrar
+        // already picked a Faculty AND Room on this row before ever
+        // clicking Auto Generate (e.g. via the Subjects tab
+        // dropdowns), try that exact pairing FIRST, before consulting
+        // the general ranked search below at all. Previously this
+        // method ignored whatever was already on the row completely
+        // and started over from its own top-ranked Faculty/Room
+        // candidates (recommendFaculty()/recommendRooms(), each
+        // capped to CANDIDATE_FACULTY/CANDIDATE_ROOMS) — so a
+        // perfectly valid, conflict-free manual pick could go
+        // completely untried and the row would still be reported
+        // "unresolved" simply because it never ranked high enough to
+        // make that shortlist. This is a PREFERENCE, not a hard
+        // requirement — it falls straight through to the normal
+        // ranked search the moment either piece is missing/inactive
+        // or that exact pairing has no open Day/Time left.
+        if ($sectionSubject->faculty_id && $sectionSubject->room_id) {
+            $manualResult = $this->tryManualAssignment($section, $sectionSubject, $subject);
+
+            if ($manualResult) {
+                return $manualResult;
+            }
+        }
+
         // TEACHING QUALIFICATION preferred, College/GenEd match
         // accepted as a fallback (spec Sections 1-4, 26, updated).
         // recommendFaculty() tries an explicit Teaching-Qualification
@@ -575,6 +599,19 @@ class AutoScheduleService
             return $this->unresolved($sectionSubject, $detail, $reasons, $siblingDiagnostics);
         }
 
+        // DIAGNOSTIC TRAIL — every Faculty×Room pairing this loop
+        // actually got to (i.e. passed the Teaching Load and Capacity
+        // hard caps) but found no open conflict-free Day/Time for, so
+        // the final "unresolved" message below can say WHICH
+        // combinations were tried and WHY each one failed, instead of
+        // a single generic line that looks identical whether the
+        // cause is "everyone is fully booked" or "something is
+        // misconfigured". $loadSkipped / $capacitySkipped are kept
+        // separate since those never even reached a Time search.
+        $attempted = [];
+        $loadSkipped = [];
+        $capacitySkipped = [];
+
         foreach (array_slice($facultyCandidates, 0, self::CANDIDATE_FACULTY) as $facultyCandidate) {
             // Teaching Load hard cap — never assign a subject that
             // would push this faculty member past their declared
@@ -583,6 +620,8 @@ class AutoScheduleService
             // load, but scoring alone doesn't stop an overload; this
             // is the hard block the spec asks for.
             if (! $this->withinTeachingLoad($facultyCandidate, $subject, $sectionSubject)) {
+                $loadSkipped[] = $facultyCandidate['name'] ?? "Faculty #{$facultyCandidate['id']}";
+
                 continue;
             }
 
@@ -590,6 +629,9 @@ class AutoScheduleService
                 // Room Capacity hard cap.
                 $capacityNeeded = $sectionSubject->capacity ?? $section->estimated_students ?? 0;
                 if ($capacityNeeded && $roomCandidate['capacity'] < $capacityNeeded) {
+                    $capacitySkipped[] = ($roomCandidate['name'] ?? "Room #{$roomCandidate['id']}").
+                        " (seats {$roomCandidate['capacity']}, needs {$capacityNeeded})";
+
                     continue;
                 }
 
@@ -604,6 +646,9 @@ class AutoScheduleService
                     // pairing — Smart Search moves on to the next
                     // Room, then the next Faculty, automatically via
                     // these loops.
+                    $attempted[] = ($facultyCandidate['name'] ?? "Faculty #{$facultyCandidate['id']}").' × '.
+                        ($roomCandidate['name'] ?? "Room #{$roomCandidate['id']}");
+
                     continue;
                 }
 
@@ -622,6 +667,9 @@ class AutoScheduleService
                 ], $sectionSubject->id);
 
                 if (! empty($errors)) {
+                    $attempted[] = ($facultyCandidate['name'] ?? "Faculty #{$facultyCandidate['id']}").' × '.
+                        ($roomCandidate['name'] ?? "Room #{$roomCandidate['id']}").' ('.reset($errors).')';
+
                     continue;
                 }
 
@@ -629,9 +677,47 @@ class AutoScheduleService
             }
         }
 
+        // Build a message that actually says WHY, not just THAT it
+        // failed — "no combination found" reads identically whether
+        // the real cause is "only one qualified Faculty and they're
+        // fully booked" or "every scoped Room is already full" or a
+        // genuine misconfiguration, and the Registrar has no way to
+        // tell those apart from the old generic line alone.
+        $detailParts = [];
+
+        if ($loadSkipped) {
+            $names = array_unique($loadSkipped);
+            $detailParts[] = 'Over Teaching Load cap: '.implode(', ', $names).'.';
+
+            // ACTIONABLE NEXT STEP — this is the one failure reason
+            // with an obvious fix, so spell it out rather than making
+            // the Registrar guess: either raise that Faculty's Max
+            // Teaching Units (Faculty Master), get a second Faculty
+            // qualified for this Subject so there's a fallback, or
+            // just assign this row manually — the manual Faculty/Room
+            // dropdowns are never blocked by the Teaching Load cap the
+            // way Auto Generate's automatic pick is.
+            $detailParts[] = 'Consider raising '.implode(' / ', $names).
+                "'s Max Teaching Units on the Faculty Master, qualifying another Faculty for this Subject, or assigning this row's Faculty/Room manually instead.";
+        }
+
+        if ($capacitySkipped) {
+            $detailParts[] = 'Room too small: '.implode(', ', array_unique($capacitySkipped)).'.';
+        }
+
+        if ($attempted) {
+            $shown = array_slice(array_unique($attempted), 0, 6);
+            $detailParts[] = 'No open Day/Time for: '.implode('; ', $shown).
+                (count($attempted) > count($shown) ? '; and others.' : '.');
+        }
+
+        $message = $detailParts
+            ? 'No conflict-free day/time combination could be found among the qualified faculty and available rooms. '.implode(' ', $detailParts)
+            : 'No conflict-free day/time combination could be found among the qualified faculty and available rooms.';
+
         return $this->unresolved(
             $sectionSubject,
-            'No conflict-free day/time combination could be found among the qualified faculty and available rooms.',
+            $message,
             [],
             $siblingDiagnostics ?? []
         );
@@ -658,7 +744,95 @@ class AutoScheduleService
             return false;
         }
 
-        return ! $this->workloadService->wouldExceed($faculty, $subject, $sectionSubject->id);
+        // SPLIT-DELIVERY SAFE EXCLUSION — mirrors
+        // SectionSubjectController::workloadWarningFor(). A
+        // Face-to-Face/Online split pair shares one section_id +
+        // subject_id but is stored as two SectionSubject rows. If we
+        // only excluded $sectionSubject->id, a sibling row that
+        // already carries this Faculty (e.g. the Online half,
+        // inherited once the Face-to-Face half is saved) would still
+        // be counted in "current load", and then the full Subject
+        // units would be added again as "additional" — double
+        // counting a single 3-unit Subject as 6 and tripping the cap
+        // even when the true combined load is well within it.
+        $excludingIds = SectionSubject::query()
+            ->where('section_id', $sectionSubject->section_id)
+            ->where('subject_id', $sectionSubject->subject_id)
+            ->pluck('id')
+            ->push($sectionSubject->id)
+            ->unique()
+            ->all();
+
+        return ! $this->workloadService->wouldExceed($faculty, $subject, $excludingIds);
+    }
+
+    /**
+     * See searchIndependent()'s "RESPECT AN EXISTING MANUAL
+     * ASSIGNMENT" comment — tries the row's OWN already-assigned
+     * Faculty + Room first, via the exact same scoring
+     * (scoreArbitraryFaculty()/scoreArbitraryRoom()) and time search
+     * (recommendTimes()) the general search uses, so a manual pick
+     * that succeeds here is indistinguishable from one the ranked
+     * search would have found itself. Returns null (never throws) to
+     * fall through to the normal search on any failure — inactive
+     * Faculty/Room, Teaching Load cap, Room capacity, or simply no
+     * conflict-free Day/Time left for that specific pairing.
+     */
+    private function tryManualAssignment(Section $section, SectionSubject $sectionSubject, Subject $subject): ?array
+    {
+        $faculty = \App\Models\Faculty::query()->where('status', 'Active')->find($sectionSubject->faculty_id);
+        $room = \App\Models\Room::query()->where('status', 'Active')->find($sectionSubject->room_id);
+
+        if (! $faculty || ! $room) {
+            return null;
+        }
+
+        $facultyCandidate = $this->recommendationService->scoreArbitraryFaculty($faculty, $subject, $section, $sectionSubject);
+
+        if (! $this->withinTeachingLoad($facultyCandidate, $subject, $sectionSubject)) {
+            return null;
+        }
+
+        $capacityNeeded = $sectionSubject->capacity ?? $section->estimated_students ?? 0;
+        if ($capacityNeeded && $room->capacity < $capacityNeeded) {
+            return null;
+        }
+
+        // Same hard Room-Type requirement the general search enforces
+        // just below (Prompt/spec Section 11) — an unattended
+        // automatic pick, manual or ranked, never lands a Lecture
+        // subject in a Laboratory room or vice versa.
+        $preferredType = ((int) $subject->laboratory_hours > 0) ? 'Laboratory' : 'Lecture';
+        if ($room->room_type !== $preferredType) {
+            return null;
+        }
+
+        $roomCandidate = $this->recommendationService->scoreArbitraryRoom($room, $subject, $section, $sectionSubject);
+
+        $timeRec = $this->recommendationService->recommendTimes(
+            $subject, $section, $faculty->id, $room->id, $sectionSubject
+        );
+
+        $bestTime = $timeRec['recommendations'][0] ?? null;
+
+        if (! $bestTime) {
+            return null;
+        }
+
+        $errors = $this->conflictService->validate([
+            'section_id' => $section->id,
+            'faculty_id' => $faculty->id,
+            'room_id' => $room->id,
+            'days' => $bestTime['days'],
+            'start_time' => $bestTime['start_time'],
+            'end_time' => $bestTime['end_time'],
+        ], $sectionSubject->id);
+
+        if (! empty($errors)) {
+            return null;
+        }
+
+        return $this->apply($sectionSubject, $facultyCandidate, $roomCandidate, $bestTime);
     }
 
     /**

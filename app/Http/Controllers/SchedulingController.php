@@ -13,7 +13,6 @@ use App\Services\RoomUtilizationService;
 use App\Support\AccessScope;
 use App\Support\ViewingTerm;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -102,32 +101,71 @@ class SchedulingController extends Controller
             ->distinct('section_id')
             ->count('section_id');
 
-        // Faculty load: assigned units (sum of subject.units for
-        // placements with a faculty attached) per faculty member.
-        $facultyLoads = SectionSubject::query()
+        // Faculty load — mirrors FacultyWorkloadService::sumLoad()'s
+        // exact rules so this widget can never disagree with the
+        // Faculty Workload tab it links to: only 'Scheduled'/'Draft'
+        // placements count (never 'Conflict'), a merged Irregular-
+        // section rider row is never counted a second time
+        // (merged_into_section_subject_id), and a Face-to-Face/Online
+        // split pair (same section_id+subject_id) is deduped down to
+        // ONE contribution instead of being summed twice. The previous
+        // version here summed every row unconditionally, which is why
+        // this widget could show e.g. 42/24 while the Faculty's own
+        // Workload tab — built on FacultyWorkloadService — showed
+        // 24/24 for the same faculty member. Scoped to $sectionIds
+        // (this Dashboard's Viewing-Term + visibleTo() scope) rather
+        // than calling FacultyWorkloadService directly, since that
+        // service always resolves the real Active term and doesn't
+        // apply per-user Section visibility.
+        $facultyPlacements = SectionSubject::query()
             ->whereIn('section_subjects.section_id', $sectionIds)
             ->whereNotNull('section_subjects.faculty_id')
-            ->join('subjects', 'subjects.id', '=', 'section_subjects.subject_id')
-            ->join('faculties', 'faculties.id', '=', 'section_subjects.faculty_id')
-            ->groupBy('faculties.id', 'faculties.first_name', 'faculties.last_name', 'faculties.max_teaching_units')
-            ->select([
-                'faculties.id',
-                'faculties.first_name',
-                'faculties.last_name',
-                'faculties.max_teaching_units',
-                DB::raw('COALESCE(SUM(subjects.units), 0) as assigned_units'),
+            ->whereIn('section_subjects.status', ['Scheduled', 'Draft'])
+            ->whereNull('section_subjects.merged_into_section_subject_id')
+            ->with([
+                'faculty:id,first_name,last_name,max_teaching_units,max_weekly_hours,workload_type',
+                'subject:id,units,lecture_hours,laboratory_hours',
             ])
-            ->orderByDesc('assigned_units')
-            ->get();
+            ->get()
+            ->filter(fn (SectionSubject $ss) => $ss->faculty !== null && $ss->subject !== null);
+
+        $facultyLoads = $facultyPlacements
+            ->unique(fn (SectionSubject $ss) => $ss->faculty_id.'-'.$ss->section_id.'-'.$ss->subject_id)
+            ->groupBy('faculty_id')
+            ->map(function ($placements) {
+                $faculty = $placements->first()->faculty;
+                $usesHours = $faculty->workload_type === 'hours';
+
+                $assignedUnits = $placements->sum(fn (SectionSubject $ss) => $usesHours
+                    ? (int) $ss->subject->lecture_hours + (int) $ss->subject->laboratory_hours
+                    : (int) $ss->subject->units);
+
+                $maxTeachingUnits = $usesHours
+                    ? (int) ($faculty->max_weekly_hours ?? 0)
+                    : (int) ($faculty->max_teaching_units ?? 0);
+
+                return (object) [
+                    'id' => $faculty->id,
+                    'first_name' => $faculty->first_name,
+                    'last_name' => $faculty->last_name,
+                    'assigned_units' => $assignedUnits,
+                    'max_teaching_units' => $maxTeachingUnits,
+                    'unit_label' => $usesHours ? 'Hours' : 'Units',
+                ];
+            })
+            ->sortByDesc('assigned_units')
+            ->values();
 
         $facultyOverloadCount = $facultyLoads->filter(
             fn ($f) => $f->max_teaching_units && $f->assigned_units > $f->max_teaching_units
         )->count();
 
         $topFaculty = $facultyLoads->take(8)->map(fn ($f) => [
+            'id' => $f->id,
             'name' => trim("{$f->first_name} {$f->last_name}"),
             'units' => (int) $f->assigned_units,
-            'max' => (int) ($f->max_teaching_units ?? 0),
+            'max' => (int) $f->max_teaching_units,
+            'unit_label' => $f->unit_label,
         ])->values();
 
         // Room conflicts: same room, overlapping day tokens, overlapping time.

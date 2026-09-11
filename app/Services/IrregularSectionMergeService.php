@@ -305,7 +305,7 @@ class IrregularSectionMergeService
             return [...$empty, 'compatible' => false, 'blocking_reason' => 'The existing class belongs to a different academic term.'];
         }
 
-        if (! $target->faculty_id || ! $target->room_id || ! $target->days || ! $target->start_time || ! $target->end_time) {
+        if (! $target->faculty_id || ($target->requiresRoom() && ! $target->room_id) || ! $target->days || ! $target->start_time || ! $target->end_time) {
             return [...$empty, 'compatible' => false, 'blocking_reason' => 'The existing class has no complete schedule to share.'];
         }
 

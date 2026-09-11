@@ -23,6 +23,14 @@ class College extends Model
         'short_name',
         'description',
         'status',
+        'counts_as_gened',
+    ];
+
+    /**
+     * @var array<string, string>
+     */
+    protected $casts = [
+        'counts_as_gened' => 'boolean',
     ];
 
     /**

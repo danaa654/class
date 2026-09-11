@@ -83,14 +83,14 @@ class FacultyWorkloadService
      *
      * @return \Illuminate\Support\Collection<int, SectionSubject>
      */
-    private function activePlacements(Faculty $faculty, ?int $excludingSectionSubjectId = null)
+    private function activePlacements(Faculty $faculty, int|array|null $excludingSectionSubjectId = null)
     {
         return SectionSubject::query()
             ->where('faculty_id', $faculty->id)
             ->whereIn('status', ['Scheduled', 'Draft'])
             ->whereIn('section_id', $this->conflictService->activeSemesterSectionIds())
             ->whereNull('merged_into_section_subject_id')
-            ->when($excludingSectionSubjectId, fn ($q) => $q->where('id', '!=', $excludingSectionSubjectId))
+            ->when($excludingSectionSubjectId, fn ($q) => $q->whereNotIn('id', (array) $excludingSectionSubjectId))
             ->with('subject:id,units,lecture_hours,laboratory_hours')
             ->get()
             ->filter(fn (SectionSubject $ss) => $ss->subject !== null);
@@ -99,8 +99,17 @@ class FacultyWorkloadService
     /**
      * The Faculty member's current committed load, in whichever unit
      * their `workload_type` uses (Units, or Weekly Hours).
+     *
+     * $excludingSectionSubjectId accepts a single id or an array of
+     * ids — callers evaluating a split-delivery row (Face-to-Face +
+     * Online pair, same section_id+subject_id) must exclude BOTH the
+     * row being saved AND its sibling component, or the sibling's
+     * still-counted placement plus this row's own "additional" load
+     * double-counts a single 3-unit Subject as 6. See
+     * SectionSubjectController::workloadWarningFor(), which builds
+     * that id list.
      */
-    public function currentLoad(Faculty $faculty, ?int $excludingSectionSubjectId = null): int
+    public function currentLoad(Faculty $faculty, int|array|null $excludingSectionSubjectId = null): int
     {
         $placements = $this->activePlacements($faculty, $excludingSectionSubjectId);
 
@@ -225,7 +234,7 @@ class FacultyWorkloadService
      * carrying in the active semester — the "Number of Assigned
      * Subjects" field the Faculty profile exposes.
      */
-    public function assignedSubjectsCount(Faculty $faculty, ?int $excludingSectionSubjectId = null): int
+    public function assignedSubjectsCount(Faculty $faculty, int|array|null $excludingSectionSubjectId = null): int
     {
         // Same dedup as sumLoad() — a split Face-to-Face/Online pair is
         // one assigned Subject, not two.
@@ -244,13 +253,33 @@ class FacultyWorkloadService
      *
      * INTELLIGENT IRREGULAR SECTION SCHEDULING — same "one class
      * session, one row" rule as activePlacements(): a merged
-     * Irregular-section row is never listed on its own here (it's
-     * excluded via whereNull('merged_into_section_subject_id') below,
-     * same as activePlacements()); instead its Section Code is folded
-     * into its host row's `section_code`, e.g. "BSIT-4A &
-     * BSIT-4A-IRREG", so the Registrar can see every Section actually
-     * sitting in that one hour without the class being counted (or
-     * its load charged) twice.
+     * Irregular-section row is folded into its host row's
+     * `section_code`, e.g. "BSIT-4A & BSIT-4A-IRREG", so the
+     * Registrar can see every Section actually sitting in that one
+     * hour without the class being counted (or its load charged)
+     * twice.
+     *
+     * FIX (cross-section merge visibility): a merged row used to be
+     * excluded outright via whereNull('merged_into_section_subject_id')
+     * below. That's fine for the "one Faculty, same Section family"
+     * Irregular-section case (BSIT-4A-IRREG has no workload page of
+     * its own that would miss anything), but breaks down the moment
+     * two INDEPENDENT Sections (e.g. BSIT-1A and BSIT-1B) merge a
+     * shared Online slot: the rider row still belongs to ITS OWN
+     * Section (section_id is unchanged by merging — only
+     * merged_into_section_subject_id is set), so dropping it from the
+     * query dropped it from its own Section's group too, making that
+     * Section look like it had no Online meeting at all, even though
+     * the class still happens and the Section is still enrolled in
+     * it. Riders are no longer excluded from the query — grouping is
+     * still keyed by section_id+subject_id (see below), so a rider
+     * simply reappears as an extra Schedule line inside its OWN
+     * Section's existing group, exactly like a normal split
+     * Face-to-Face/Online pair. This does NOT affect Current Load
+     * totals: `load` here is still computed ONCE per group from
+     * $primary->subject, never per Schedule row, and sumLoad()/
+     * activePlacements() (the totals used for load-cap checks) are
+     * untouched and keep their own whereNull() exclusion.
      *
      * SPLIT-DELIVERY SCHEDULING — a Face-to-Face/Online split pair
      * (same section_id + subject_id) is grouped into ONE array entry
@@ -267,16 +296,20 @@ class FacultyWorkloadService
      *         id: int, section_id: int, delivery_mode: ?string,
      *         room_id: ?int, room_name: ?string, days: ?string,
      *         start_time: ?string, end_time: ?string, status: ?string,
+     *         shared_with_section: ?string,
      *     }>,
      * }>
      */
-    public function assignedPlacements(Faculty $faculty, ?int $excludingSectionSubjectId = null): array
+    public function assignedPlacements(Faculty $faculty, int|array|null $excludingSectionSubjectId = null): array
     {
         $placements = SectionSubject::query()
             ->where('faculty_id', $faculty->id)
             ->whereIn('status', ['Scheduled', 'Draft'])
             ->whereIn('section_id', $this->conflictService->activeSemesterSectionIds())
-            ->whereNull('merged_into_section_subject_id')
+            // NOTE: no longer whereNull('merged_into_section_subject_id')
+            // here — see the "FIX (cross-section merge visibility)"
+            // docblock above. Riders are kept and handled per-group
+            // below instead of being dropped from the query outright.
             ->when($excludingSectionSubjectId, fn ($q) => $q->where('id', '!=', $excludingSectionSubjectId))
             ->with([
                 'subject:id,subject_code,subject_title,units,lecture_hours,laboratory_hours',
@@ -286,6 +319,11 @@ class FacultyWorkloadService
                 // riding along on the exact same class session, never
                 // a separate one. See mergedPlacements() on the model.
                 'mergedPlacements.section:id,section_code',
+                // A rider row's own merge target — needed to label
+                // that row "Shared with <host Section>" below (the
+                // host side already gets its partner's code via
+                // mergedPlacements above).
+                'mergedInto.section:id,section_code',
             ])
             ->get()
             ->filter(fn (SectionSubject $ss) => $ss->subject !== null);
@@ -345,19 +383,41 @@ class FacultyWorkloadService
                     // Subject has two (Face-to-Face, then Online),
                     // each independently editable in the Faculty
                     // Details page's inline editor.
+                    //
+                    // `shared_with_section` — UX LABEL for the
+                    // faculty-shortage merge scenario: when a Section
+                    // can't get its own instructor for a slot and the
+                    // school instead has one Faculty run a single
+                    // Online session for two Sections at once, this
+                    // makes that visible on BOTH sides (not just as a
+                    // combined section_code on the host) so the
+                    // Registrar immediately understands why this one
+                    // line reads differently from a normal class,
+                    // instead of assuming the slot is free or that
+                    // something's broken. Null for a normal,
+                    // never-merged row.
                     'schedules' => $group
                         ->sortBy(fn (SectionSubject $ss) => $ss->delivery_mode === 'online' ? 1 : 0)
-                        ->map(fn (SectionSubject $ss) => [
-                            'id' => $ss->id,
-                            'section_id' => $ss->section_id,
-                            'delivery_mode' => $ss->delivery_mode,
-                            'room_id' => $ss->room_id,
-                            'room_name' => $ss->delivery_mode === 'online' ? 'Online' : $ss->room?->room_name,
-                            'days' => $ss->days,
-                            'start_time' => $ss->start_time,
-                            'end_time' => $ss->end_time,
-                            'status' => $ss->status,
-                        ])
+                        ->map(function (SectionSubject $ss) {
+                            $sharedWith = $ss->merged_into_section_subject_id
+                                // Rider row: labelled with the host's Section.
+                                ? $ss->mergedInto?->section?->section_code
+                                // Host row: labelled with its rider(s)' Section(s).
+                                : $ss->mergedPlacements->pluck('section.section_code')->filter()->implode(' & ');
+
+                            return [
+                                'id' => $ss->id,
+                                'section_id' => $ss->section_id,
+                                'delivery_mode' => $ss->delivery_mode,
+                                'room_id' => $ss->room_id,
+                                'room_name' => $ss->delivery_mode === 'online' ? 'Online' : $ss->room?->room_name,
+                                'days' => $ss->days,
+                                'start_time' => $ss->start_time,
+                                'end_time' => $ss->end_time,
+                                'status' => $ss->status,
+                                'shared_with_section' => $sharedWith ?: null,
+                            ];
+                        })
                         ->values()
                         ->all(),
                 ];
@@ -494,7 +554,7 @@ class FacultyWorkloadService
      *      summary numbers — the Faculty Details "Workload" tab is the
      *      one place that actually needs the list, so it opts in.
      */
-    public function evaluate(Faculty $faculty, ?\App\Models\Subject $additionalSubject = null, ?int $excludingSectionSubjectId = null, bool $includePlacements = false): array
+    public function evaluate(Faculty $faculty, ?\App\Models\Subject $additionalSubject = null, int|array|null $excludingSectionSubjectId = null, bool $includePlacements = false): array
     {
         $max = $this->maxLoad($faculty);
         $current = $this->currentLoad($faculty, $excludingSectionSubjectId);
@@ -534,7 +594,7 @@ class FacultyWorkloadService
      * explicitly overrides it. A Faculty member with no Maximum Load
      * configured (max = 0) can never be "exceeded".
      */
-    public function wouldExceed(Faculty $faculty, ?\App\Models\Subject $additionalSubject, ?int $excludingSectionSubjectId = null): bool
+    public function wouldExceed(Faculty $faculty, ?\App\Models\Subject $additionalSubject, int|array|null $excludingSectionSubjectId = null): bool
     {
         $max = $this->maxLoad($faculty);
         if ($max <= 0) {

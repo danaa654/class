@@ -132,6 +132,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/scheduling/faculty', [FacultyController::class, 'store'])->name('scheduling.faculty.store');
     Route::get('/scheduling/faculty/{faculty}', [FacultyController::class, 'show'])->name('scheduling.faculty.show');
     Route::put('/scheduling/faculty/{faculty}', [FacultyController::class, 'update'])->name('scheduling.faculty.update');
+    Route::patch('/scheduling/faculty/{faculty}/max-load', [FacultyController::class, 'updateMaxLoad'])->name('scheduling.faculty.max-load.update');
     Route::delete('/scheduling/faculty/{faculty}', [FacultyController::class, 'destroy'])->name('scheduling.faculty.destroy');
 
     // Faculty load change requests — Dean/OIC/Assistant Dean's only
@@ -273,6 +274,7 @@ Route::middleware('auth')->group(function () {
     Route::patch('/notifications/{notification}/read', [NotificationController::class, 'markRead'])->name('notifications.read');
     Route::patch('/notifications/mark-all-read', [NotificationController::class, 'markAllRead'])->name('notifications.mark-all-read');
     Route::get('/notifications/{notification}/redirect', [NotificationController::class, 'redirect'])->name('notifications.redirect');
+    Route::delete('/notifications/read-all', [NotificationController::class, 'destroyAllRead'])->name('notifications.destroy-all-read');
     Route::delete('/notifications/{notification}', [NotificationController::class, 'destroy'])->name('notifications.destroy');
 
     Route::get('/reports', [ReportsController::class, 'index'])->name('reports');

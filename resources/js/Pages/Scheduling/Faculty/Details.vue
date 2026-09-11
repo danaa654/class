@@ -1030,6 +1030,13 @@ const saveEditPlacement = async (placement, confirmedKeys = {}) => {
                                                         </div>
                                                         <span v-else-if="schedule.days">
                                                             {{ schedule.days }} &middot; {{ formatTime(schedule.start_time) }}–{{ formatTime(schedule.end_time) }}
+                                                            <span
+                                                                v-if="schedule.shared_with_section"
+                                                                class="ml-1 inline-block rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"
+                                                                :title="`Shared Online session — one Faculty covering both this Section and ${schedule.shared_with_section}`"
+                                                            >
+                                                                Shared with {{ schedule.shared_with_section }}
+                                                            </span>
                                                         </span>
                                                         <span v-else class="text-slate-400">Not yet scheduled</span>
                                                     </div>
