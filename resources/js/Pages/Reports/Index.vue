@@ -106,6 +106,16 @@ const bulkSendScopeLabel = computed(() => {
     return 'All Active Faculty (entire school)';
 });
 
+// Maps the College/Program filter to what bulkSend() actually accepts
+// server-side: 'gened' for the General Education Faculty pseudo-option
+// (no real college_id), the numeric college id, or null for "no
+// College narrowing" (all programs). Only takes effect when facultyIds
+// is empty — an explicit multi-select always wins server-side too.
+const bulkSendCollegeId = computed(() => {
+    if (form.value.college_id === GENED_COLLEGE_VALUE) return 'gened';
+    return form.value.college_id || null;
+});
+
 // Only shown when the single-faculty flow doesn't apply — i.e. zero or
 // several faculty selected, matching how facultyMeta/sendScheduleFaculty
 // only populates for exactly one.
@@ -968,6 +978,7 @@ const summaryCards = computed(() => [
         <BulkSendScheduleModal
             :show="showBulkSendModal"
             :faculty-ids="facultyIds"
+            :college-id="bulkSendCollegeId"
             :academic-term="bulkSendTerm"
             :scope-label="bulkSendScopeLabel"
             @close="showBulkSendModal = false"

@@ -10,7 +10,8 @@ import { router } from '@inertiajs/vue3'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
-  facultyIds: { type: Array, default: () => [] }, // empty = every Active faculty
+  facultyIds: { type: Array, default: () => [] }, // empty = every Active faculty (or College-scoped, see collegeId)
+  collegeId: { type: [String, Number, null], default: null }, // Reports' College/Program filter — only applied server-side when facultyIds is empty
   academicTerm: { type: Object, default: null }, // { id, label }
   scopeLabel: { type: String, default: '' }, // e.g. "College of Computer Studies" or "3 selected faculty"
 })
@@ -35,6 +36,7 @@ function confirmSend() {
   router.post('/reports/faculty-schedule/bulk-send', {
     academic_term_id: props.academicTerm.id,
     faculty_ids: props.facultyIds,
+    college_id: props.collegeId,
   }, {
     preserveScroll: true,
     onSuccess: () => emit('sent'),
@@ -64,6 +66,11 @@ function confirmSend() {
             <strong>valid email address</strong> will receive a schedule.
             Anyone else in scope will be skipped automatically — nothing
             fails the whole send.
+          </p>
+          <p v-if="collegeId && facultyIds.length === 0" style="margin-top: 8px;">
+            No individual faculty are hand-picked, so this send is scoped to
+            the <strong>College/Program filter</strong> shown above — not
+            the entire school.
           </p>
         </div>
 

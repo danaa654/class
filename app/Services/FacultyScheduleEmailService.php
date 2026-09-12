@@ -218,11 +218,26 @@ class FacultyScheduleEmailService
      * @param  array<int>|null  $facultyIds
      * @return array{total: int, with_email: int, missing_email: int, queued: int}
      */
-    public function bulkSend(AcademicTerm $term, User $sender, ?array $facultyIds = null): array
+    /**
+     * "Send All Faculty Schedules" (spec section 15/16).
+     *
+     * $facultyIds (explicit multi-select on Reports) always wins when
+     * present. Otherwise, $collegeId scopes the send to match whatever
+     * the Reports page's College/Program filter was showing — without
+     * this, picking a College filter but not hand-picking individual
+     * faculty names silently fell back to "every Active faculty",
+     * emailing the entire school despite the on-screen scope label
+     * claiming otherwise. null = "General Education Faculty" (no real
+     * College, see Faculty::college_id / GENED_COLLEGE_VALUE on the
+     * frontend), 'all' or omitted = no College narrowing at all.
+     */
+    public function bulkSend(AcademicTerm $term, User $sender, ?array $facultyIds = null, string|int|null $collegeId = null): array
     {
         $faculty = Faculty::query()
             ->where('status', 'Active')
             ->when($facultyIds, fn ($q) => $q->whereIn('id', $facultyIds))
+            ->when(! $facultyIds && $collegeId === 'gened', fn ($q) => $q->whereNull('college_id'))
+            ->when(! $facultyIds && $collegeId !== null && $collegeId !== 'gened', fn ($q) => $q->where('college_id', $collegeId))
             ->get();
 
         $missingEmail = 0;
