@@ -833,9 +833,18 @@ const tableConflicts = computed(() => {
         // Confirmable, not a hard block — mirrors the Room Capacity
         // Warning above exactly, and the same room_type check the
         // server runs on Save Schedule (SectionSubjectController).
+        // NEVER flagged when the assigned Room is an explicit
+        // Administrator Override (subject.recommended_room_ids —
+        // see Subject::getRecommendedRoomIdsAttribute()) for this
+        // Subject — same exemption AutoScheduleService's own Room
+        // Type filter already grants that pairing (see
+        // searchIndependent()'s `is_manual_override` check). A
+        // deliberately-configured Room/Subject pairing shouldn't
+        // have to be re-confirmed here every time it's placed.
         if (a.room_id) {
             const room = roomsById.value[a.room_id];
-            if (room && room.room_type && !stateFor(a.id).roomTypeConfirmed) {
+            const isAdminOverride = (a.subject?.recommended_room_ids ?? []).includes(a.room_id);
+            if (room && room.room_type && !isAdminOverride && !stateFor(a.id).roomTypeConfirmed) {
                 const wantsLaboratory = Number(a.subject?.laboratory_hours ?? 0) > 0;
                 const typeMismatch = wantsLaboratory
                     ? room.room_type !== 'Laboratory'
@@ -3274,8 +3283,31 @@ const closeSplitModal = () => {
     splitModalRow.value = null;
 };
 
-const submitSplit = async () => {
+const submitSplit = async (hoursConfirmed = false) => {
     if (!splitModalRow.value) return;
+
+    // Split Total Mismatch — confirmable, not a hard block, same
+    // "Registrar is free to trim/extend declared hours" philosophy as
+    // the Weekly Hours Mismatch check on Days/Start/End Time (see
+    // StoreSectionSubjectSplitRequest). Ask BEFORE the request only
+    // when the totals actually disagree — an exact match never
+    // prompts anything, same as before this flow existed.
+    const enteredTotal = Number(splitForm.f2f_hours || 0) + Number(splitForm.online_hours || 0);
+    if (!hoursConfirmed && enteredTotal !== splitTotalHours.value) {
+        const result = await Swal.fire({
+            icon: 'warning',
+            title: 'Split Hours Mismatch',
+            html: `<div class="text-left text-sm">${splitModalRow.value.subject?.subject_code ?? 'This subject'} — Face-to-Face + Online hours total ${enteredTotal}, but the subject's declared hours are ${splitTotalHours.value}. You can still save this split; just make sure each half's actual Days/Start/End Time matches what you entered here.</div>`,
+            showCancelButton: true,
+            confirmButtonText: 'Save Anyway',
+            cancelButtonText: 'Go Back',
+            confirmButtonColor: '#dc2626',
+        });
+
+        if (!result.isConfirmed) return;
+
+        return submitSplit(true);
+    }
 
     splitSaving.value = true;
     splitErrors.value = {};
@@ -3286,6 +3318,7 @@ const submitSplit = async () => {
             {
                 f2f_hours: Number(splitForm.f2f_hours),
                 online_hours: Number(splitForm.online_hours),
+                hours_confirmed: hoursConfirmed,
             },
         );
 
@@ -5231,14 +5264,18 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                     </p>
                 </div>
 
-                <p class="text-xs text-slate-400">
+                <p
+                    class="text-xs"
+                    :class="(Number(splitForm.f2f_hours || 0) + Number(splitForm.online_hours || 0)) !== splitTotalHours ? 'text-amber-600 font-medium' : 'text-slate-400'"
+                >
                     Total entered: {{ Number(splitForm.f2f_hours || 0) + Number(splitForm.online_hours || 0) }} / {{ splitTotalHours }} hr(s) required
+                    <span v-if="(Number(splitForm.f2f_hours || 0) + Number(splitForm.online_hours || 0)) !== splitTotalHours">— you'll be asked to confirm before saving</span>
                 </p>
             </div>
 
             <template #footer>
                 <Button label="Cancel" text @click="closeSplitModal" :disabled="splitSaving" />
-                <Button label="Save Split" icon="pi pi-check" :loading="splitSaving" @click="submitSplit" />
+                <Button label="Save Split" icon="pi pi-check" :loading="splitSaving" @click="submitSplit()" />
             </template>
         </Dialog>
     </AppLayout>

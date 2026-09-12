@@ -171,21 +171,15 @@ class FacultyPolicy
 
     /**
      * Whether the user may manage a specific teaching qualification
-     * entry, based on whether that qualification is a Major subject
-     * (College-owned, Dean/OIC's lane) or GenEd/Minor (Assistant
-     * Dean's lane), regardless of which College the faculty belongs to.
+     * entry. General Education stays Assistant-Dean-exclusive
+     * (institution-wide floating pool); Major and Minor are both
+     * manageable by the faculty's own College Dean/OIC (Minor is also
+     * manageable by Assistant Dean, institution-wide). See
+     * AccessScope::canManageQualification() for the full rationale.
      */
     public function manageQualification(User $user, Faculty $faculty, string $subjectCategory): bool
     {
-        if (AccessScope::isUnrestricted($user)) {
-            return true;
-        }
-
-        if (AccessScope::isSharedCategory($subjectCategory)) {
-            return AccessScope::isAssistantDean($user);
-        }
-
-        return AccessScope::isCollegeScoped($user) && AccessScope::canAccessCollege($user, $faculty->college_id);
+        return AccessScope::canManageQualification($user, $subjectCategory, $faculty->college_id);
     }
 
     private function canAccess(User $user, Faculty $faculty): bool

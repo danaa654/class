@@ -338,6 +338,22 @@ class ScheduleConflictService
         // index — see the accompanying migration) do this in one pass
         // per day instead of loading rows into memory at all.
         foreach ($dayTokens as $day) {
+            // FIX (SQLite test suite failure): TIMESTAMPDIFF() is a
+            // MySQL-only function. Production runs on MySQL so this
+            // worked there, but the SQLite :memory: DB the test suite
+            // runs against has no such function and threw "no such
+            // column: MINUTE" (SQLite tried to parse MINUTE as a
+            // column reference). strftime('%s', ...) is SQLite's
+            // native equivalent for this — and per the manual check
+            // above, it also correctly parses bare `HH:MM:SS` TIME
+            // values (no date part) as today's date at that time, so
+            // the subtraction still yields the right minute delta.
+            // Branching on the connection driver keeps the real
+            // MySQL codepath byte-for-byte unchanged.
+            $diffInMinutesSql = SectionSubject::query()->getConnection()->getDriverName() === 'sqlite'
+                ? "((strftime('%s', end_time) - strftime('%s', start_time)) / 60)"
+                : 'TIMESTAMPDIFF(MINUTE, start_time, end_time)';
+
             $existingMinutes = (int) SectionSubject::query()
                 ->where('faculty_id', $facultyId)
                 ->whereIn('section_id', $this->scopedSectionIds($sectionId))
@@ -346,7 +362,7 @@ class ScheduleConflictService
                 ->whereNotNull('start_time')
                 ->whereNotNull('end_time')
                 ->where('days', 'like', "%{$day}%")
-                ->sum(\Illuminate\Support\Facades\DB::raw('TIMESTAMPDIFF(MINUTE, start_time, end_time)'));
+                ->sum(\Illuminate\Support\Facades\DB::raw($diffInMinutesSql));
 
             $projectedMinutes = $existingMinutes + $newMinutes;
 

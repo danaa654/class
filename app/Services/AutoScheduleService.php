@@ -577,19 +577,25 @@ class AutoScheduleService
         $roomRec = $this->recommendationService->recommendRooms($subject, $section, $sectionSubject);
         $roomCandidates = $roomRec['recommendations'];
 
-        // ROOM TYPE COMPATIBILITY — HARD REQUIREMENT (spec Section 11).
-        // recommendRooms() lets an explicit Room recommendation bypass
-        // the Lecture/Laboratory Type filter, which is correct for the
-        // human-facing selector (a Registrar can deliberately override
-        // it) but not for an unattended automatic pick — a recommended
-        // Room must still be the right Type before Auto Schedule will
-        // ever use it. Type-overridden candidates are dropped here
-        // rather than in RecommendationService so the selector's
-        // "Administrator Override" option is untouched.
+        // ROOM TYPE COMPATIBILITY — HARD REQUIREMENT (spec Section 11),
+        // WITH ONE EXPLICIT ESCAPE HATCH. recommendRooms() lets an
+        // explicit Room recommendation bypass the Lecture/Laboratory
+        // Type filter for the human-facing selector; here, an
+        // unattended automatic pick honors that SAME bypass only when
+        // the candidate is flagged `is_manual_override` — i.e. an
+        // Administrator explicitly paired this exact Room with this
+        // exact Subject on the Room Details page (see
+        // RoomSubjectRecommendation / RecommendationService's
+        // recommendationLevel()), not merely "recommended" in the
+        // general sense. Every other Type-mismatched room (Program/
+        // College/Shared tier with no such explicit override) is still
+        // dropped here rather than in RecommendationService, so the
+        // selector's own "Administrator Override" option stays
+        // untouched either way.
         $roomCandidates = array_values(array_filter($roomCandidates, function (array $room) use ($subject) {
             $preferredType = ((int) $subject->laboratory_hours > 0) ? 'Laboratory' : 'Lecture';
 
-            return ($room['room_type'] ?? null) === $preferredType;
+            return ($room['room_type'] ?? null) === $preferredType || ($room['is_manual_override'] ?? false);
         }));
 
         if (empty($roomCandidates)) {

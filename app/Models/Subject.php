@@ -36,6 +36,17 @@ class Subject extends Model
     ];
 
     /**
+     * `recommended_room_ids` is derived (see
+     * getRecommendedRoomIdsAttribute() above) rather than a real
+     * column, so it must be explicitly appended to appear in JSON
+     * responses — same pattern as SectionSubject::$appends for
+     * `faculty_mismatch`.
+     *
+     * @var list<string>
+     */
+    protected $appends = ['recommended_room_ids'];
+
+    /**
      * @return array<string, string>
      */
     protected function casts(): array
@@ -141,6 +152,26 @@ class Subject extends Model
             ->wherePivot('active', true)
             ->withPivot(['id', 'active', 'created_by', 'created_at'])
             ->withTimestamps();
+    }
+
+    /**
+     * The ids of every Room explicitly recommended for this Subject —
+     * appended (when the relation is eager-loaded) so the Scheduling
+     * table's client-side Room Type Mismatch check (Show.vue) can tell
+     * an intentional Administrator Override apart from an accidental
+     * manual placement, the same way AutoScheduleService's own Room
+     * Type filter already does via `is_manual_override`. Deliberately
+     * returns an empty array (never lazy-loads) when the relation
+     * wasn't eager-loaded, so a caller that doesn't need this never
+     * pays for an extra query per Subject.
+     *
+     * @return array<int>
+     */
+    public function getRecommendedRoomIdsAttribute(): array
+    {
+        return $this->relationLoaded('recommendedRooms')
+            ? $this->recommendedRooms->pluck('id')->all()
+            : [];
     }
 
     /** True for General Education / Minor subjects — institution-wide, shared across every College (spec Section 13). */

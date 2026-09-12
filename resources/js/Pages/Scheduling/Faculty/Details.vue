@@ -268,7 +268,38 @@ const removeSubject = (subjectId) => {
     selectedSubjectIds.value = selectedSubjectIds.value.filter((id) => id !== subjectId);
 };
 
-const saveQualifications = () => {
+const saveQualifications = async () => {
+    // Warn (don't block — cross-college Major assignments are a valid
+    // use case, e.g. a faculty covering a course outside their home
+    // College) whenever a newly-added subject is a Major subject that
+    // belongs to a DIFFERENT College than this faculty's own. Only
+    // checked against subjects being newly added this save, not ones
+    // already on the faculty's record, so re-saving with no changes to
+    // that slice never re-prompts.
+    const originalIds = new Set((props.faculty.subjects ?? []).map((subject) => subject.id));
+    const bySubjectId = new Map(props.subjects.map((subject) => [subject.id, subject]));
+    const newlyAddedCrossCollegeMajors = selectedSubjectIds.value
+        .filter((id) => !originalIds.has(id))
+        .map((id) => bySubjectId.get(id))
+        .filter((subject) => subject && subject.category === 'Major' && subject.college_id !== props.faculty.college_id);
+
+    if (newlyAddedCrossCollegeMajors.length) {
+        const list = newlyAddedCrossCollegeMajors
+            .map((subject) => `<li><strong>${subject.subject_code}</strong> — ${subject.subject_title}</li>`)
+            .join('');
+        const result = await Swal.fire({
+            icon: 'warning',
+            title: 'Major subject from another College',
+            html: `${newlyAddedCrossCollegeMajors.length > 1 ? 'These are Major subjects' : 'This is a Major subject'} of a different College/department than ${props.faculty.first_name ?? 'this faculty member'}'s own (${props.faculty.college?.name ?? 'no College'}):<ul class="text-left mt-2">${list}</ul>Assign anyway?`,
+            showCancelButton: true,
+            confirmButtonText: 'Assign Anyway',
+            cancelButtonText: 'Cancel',
+        });
+        if (!result.isConfirmed) {
+            return;
+        }
+    }
+
     savingQualifications.value = true;
 
     router.put(

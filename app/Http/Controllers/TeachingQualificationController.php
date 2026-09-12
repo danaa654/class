@@ -84,14 +84,6 @@ class TeachingQualificationController extends Controller
 
     private function userManagesQualification($user, Faculty $faculty, string $category): bool
     {
-        if (AccessScope::isUnrestricted($user)) {
-            return true;
-        }
-
-        if (AccessScope::isSharedCategory($category)) {
-            return AccessScope::isAssistantDean($user);
-        }
-
-        return AccessScope::isCollegeScoped($user) && AccessScope::canAccessCollege($user, $faculty->college_id);
+        return AccessScope::canManageQualification($user, $category, $faculty->college_id);
     }
 }

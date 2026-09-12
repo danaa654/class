@@ -40,17 +40,40 @@ return new class extends Migration
             $table->index('edp_code', 'section_subjects_edp_code_idx');
         });
 
-        DB::table('section_subjects as lecture_row')
-            ->join('section_subjects as f2f_row', function ($join) {
-                $join->on('f2f_row.section_id', '=', 'lecture_row.section_id')
-                    ->on('f2f_row.subject_id', '=', 'lecture_row.subject_id')
-                    ->where('f2f_row.component', '=', 'laboratory');
-            })
-            ->where('lecture_row.component', '=', 'lecture')
-            ->whereColumn('lecture_row.edp_code', '!=', 'f2f_row.edp_code')
-            ->update([
-                'lecture_row.edp_code' => DB::raw('f2f_row.edp_code'),
-            ]);
+        // FIX (SQLite test suite failure): the original version of this
+        // reconciliation used DB::table(...)->join(...)->update(['lecture_row.edp_code' =>
+        // DB::raw('f2f_row.edp_code')]). On MySQL, Laravel compiles that
+        // straight to a real multi-table `UPDATE ... JOIN ... SET`, which
+        // MySQL supports natively. SQLite has no such statement, so
+        // Laravel's SQLite grammar instead rewrites joined updates into
+        // `UPDATE section_subjects SET edp_code = f2f_row.edp_code WHERE
+        // rowid IN (<subquery containing the join>)` — but the `f2f_row`
+        // alias only exists inside that subquery, not in the outer SET
+        // clause, so SQLite throws "no such column: f2f_row.edp_code"
+        // (every test suite run against the SQLite :memory: DB hit this,
+        // since RefreshDatabase runs every migration first). A correlated
+        // subquery is standard SQL that both SQLite and MySQL execute
+        // identically, so it replaces the join-update entirely instead of
+        // special-casing the driver.
+        DB::statement(<<<'SQL'
+            update section_subjects
+            set edp_code = (
+                select f2f_row.edp_code
+                from section_subjects as f2f_row
+                where f2f_row.section_id = section_subjects.section_id
+                  and f2f_row.subject_id = section_subjects.subject_id
+                  and f2f_row.component = 'laboratory'
+            )
+            where component = 'lecture'
+              and exists (
+                  select 1
+                  from section_subjects as f2f_row
+                  where f2f_row.section_id = section_subjects.section_id
+                    and f2f_row.subject_id = section_subjects.subject_id
+                    and f2f_row.component = 'laboratory'
+                    and f2f_row.edp_code != section_subjects.edp_code
+              )
+        SQL);
     }
 
     public function down(): void

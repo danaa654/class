@@ -175,6 +175,41 @@ class AccessScope
     }
 
     /**
+     * Whether $user may manage the TEACHING QUALIFICATION link between a
+     * Faculty member and a Subject of the given category — i.e. "is this
+     * faculty allowed to teach this subject", not the subject's
+     * institution-wide DEFINITION (title/units/room type — see
+     * canModifySharedDefinition()/SubjectPolicy).
+     *
+     * This is intentionally narrower than isSharedCategory():
+     *   - General Education stays Assistant-Dean-exclusive, because a
+     *     GenEd faculty pool floats across every College and isn't any
+     *     one Dean/OIC's roster to manage.
+     *   - Minor, by contrast, is still qualifying a specific faculty
+     *     member who DOES belong to one College — so that College's
+     *     Dean/OIC may grant/revoke a Minor qualification for their own
+     *     faculty, same as they would a Major one. Assistant Dean keeps
+     *     institution-wide reach over Minor qualifications too.
+     *   - Major is unchanged: Dean/OIC only, own College.
+     */
+    public static function canManageQualification(?User $user, string $category, ?int $facultyCollegeId): bool
+    {
+        if (self::isUnrestricted($user)) {
+            return true;
+        }
+
+        if ($category === 'General Education') {
+            return self::isAssistantDean($user);
+        }
+
+        if ($category === 'Minor' && self::isAssistantDean($user)) {
+            return true;
+        }
+
+        return self::isCollegeScoped($user) && self::canAccessCollege($user, $facultyCollegeId);
+    }
+
+    /**
      * Dean/OIC may VIEW and USE (assign to their own sections) a
      * shared GenEd/Minor resource, but only Admin/Registrar/Assistant
      * Dean may modify the institution-wide definition itself.

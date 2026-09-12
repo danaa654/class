@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Faculty;
 use App\Models\Room;
+use App\Models\RoomSubjectRecommendation;
 use App\Models\Section;
 use App\Models\SectionSubject;
 use App\Models\User;
@@ -536,9 +537,28 @@ class DashboardService
      */
     private function roomTypeMismatchDetails(Collection $placements): array
     {
+        // Explicit Administrator Overrides (room_subject_recommendations)
+        // among these placements' actual Room/Subject pairings — fetched
+        // in ONE batched query rather than per-placement, same
+        // reasoning as $facultyCurrentLoads in SectionSubjectController.
+        // A pairing in this set is never a Room Type Mismatch: same
+        // exemption AutoScheduleService's own Room Type filter and
+        // Show.vue's client-side check already grant it.
+        $overridePairs = RoomSubjectRecommendation::query()
+            ->where('active', true)
+            ->whereIn('room_id', $placements->pluck('room_id')->filter()->unique())
+            ->whereIn('subject_id', $placements->pluck('subject_id')->filter()->unique())
+            ->get(['room_id', 'subject_id'])
+            ->map(fn ($pair) => "{$pair->room_id}:{$pair->subject_id}")
+            ->flip();
+
         return $placements
-            ->filter(function (SectionSubject $p) {
+            ->filter(function (SectionSubject $p) use ($overridePairs) {
                 if (! $p->room_id || ! $p->room || ! $p->subject || $p->room_type_confirmed) {
+                    return false;
+                }
+
+                if ($overridePairs->has("{$p->room_id}:{$p->subject_id}")) {
                     return false;
                 }
 

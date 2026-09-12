@@ -18,6 +18,19 @@
             }
         }
     }
+
+    // Sum of each row's credit Units (the "Load" column) — a separate
+    // figure from $totalHours above: Units are the subject's fixed
+    // curriculum credit value, while $totalHours is the faculty's
+    // actual weekly contact-hour total derived from schedule times.
+    // Both are shown in the footer so this PDF matches the Faculty
+    // Workload tab's "Assigned Subjects" Units total as well as
+    // reflecting real weekly teaching hours — one is not a substitute
+    // for the other.
+    $totalUnits = 0;
+    foreach ($rows as $row) {
+        $totalUnits += (float) ($row['units'] ?? 0);
+    }
 @endphp
 <!DOCTYPE html>
 <html>
@@ -148,7 +161,11 @@
         </tbody>
     </table>
 
-    <div class="totals">Total Teaching Hours: {{ number_format($totalHours, 1) }}</div>
+    <div class="totals">
+        Total Units: {{ number_format($totalUnits, 1) }}
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        Total Teaching Hours: {{ number_format($totalHours, 1) }}
+    </div>
 
     <table class="signoff">
         <tr>

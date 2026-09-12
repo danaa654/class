@@ -16,6 +16,7 @@ use App\Models\Faculty;
 use App\Models\FacultyLoadRequest;
 use App\Models\Major;
 use App\Models\Room;
+use App\Models\RoomSubjectRecommendation;
 use App\Models\Section;
 use App\Models\SectionSubject;
 use App\Models\SchoolYear;
@@ -122,6 +123,30 @@ class SectionSubjectController extends Controller implements HasMiddleware
      * (via `additional`) prices the pair correctly regardless of which
      * half is saved first.
      */
+    /**
+     * Whether $room is an explicit Administrator Override for $subject
+     * (a `room_subject_recommendations` pairing configured on the Room
+     * Details page) — the same exemption AutoScheduleService's own
+     * Room Type filter already grants that pairing (see
+     * searchIndependent()'s `is_manual_override` check) and Show.vue's
+     * client-side Room Type Mismatch warning grants via
+     * subject.recommended_room_ids. Checked here too so the server-side
+     * room_type_confirmed gate below never rejects a save the client
+     * never even asked the Registrar to confirm.
+     */
+    private function isAdminOverrideRoom(?\App\Models\Room $room, ?\App\Models\Subject $subject): bool
+    {
+        if (! $room || ! $subject) {
+            return false;
+        }
+
+        return RoomSubjectRecommendation::query()
+            ->where('room_id', $room->id)
+            ->where('subject_id', $subject->id)
+            ->where('active', true)
+            ->exists();
+    }
+
     private function workloadWarningFor(?int $facultyId, ?\App\Models\Subject $subject, SectionSubject $row): ?array
     {
         if (! $facultyId || ! $subject) {
@@ -286,7 +311,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
         $search = trim((string) $request->query('subject_search', ''));
 
         $sectionSubjects = $section->sectionSubjects()
-            ->with(['subject', 'faculty', 'room', 'mergedInto.section:id,section_code'])
+            ->with(['subject.recommendedRooms:id', 'faculty', 'room', 'mergedInto.section:id,section_code'])
             ->when($search !== '', function ($query) use ($search) {
                 $query->whereHas('subject', function ($subjectQuery) use ($search) {
                     $subjectQuery->where('subject_code', 'like', "%{$search}%")
@@ -862,7 +887,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // SectionSubjects/Show.vue's tableConflicts() for where the
         // Registrar is prompted to confirm.
         $subject->loadMissing('subject');
-        if ($room && $room->room_type && ! $request->boolean('room_type_confirmed') && ! $deferMismatchConfirmation) {
+        if ($room && $room->room_type && ! $request->boolean('room_type_confirmed') && ! $deferMismatchConfirmation && ! $this->isAdminOverrideRoom($room, $subject->subject)) {
             $wantsLaboratory = (int) $subject->subject->laboratory_hours > 0;
             $typeMismatch = $wantsLaboratory
                 ? $room->room_type !== 'Laboratory'
@@ -2475,7 +2500,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
         $this->mergeService->applyMerge($subject, $host, $outcome);
 
         return response()->json([
-            'sectionSubjects' => $section->sectionSubjects()->with(['subject', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
+            'sectionSubjects' => $section->sectionSubjects()->with(['subject.recommendedRooms:id', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
             'message' => "Merged {$subject->subject->subject_code} into {$host->section->section_code}.",
         ]);
     }
@@ -2498,7 +2523,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
         $outcome = $this->autoScheduleService->scheduleIndependently($section, $subject);
 
         return response()->json([
-            'sectionSubjects' => $section->sectionSubjects()->with(['subject', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
+            'sectionSubjects' => $section->sectionSubjects()->with(['subject.recommendedRooms:id', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
             'message' => $outcome['success']
                 ? "{$subject->subject->subject_code} was scheduled independently."
                 : ($outcome['result']['reason'] ?? 'Could not find a conflict-free independent schedule for this subject.'),
@@ -2566,7 +2591,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
 
         return response()->json([
             ...$summary,
-            'sectionSubjects' => $section->sectionSubjects()->with(['subject', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
+            'sectionSubjects' => $section->sectionSubjects()->with(['subject.recommendedRooms:id', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
             // Every result row this run wrote carries this as its
             // `generated_from_version` — the frontend should send it
             // back as `expected_schedule_version` on the eventual
@@ -2603,7 +2628,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
 
         return response()->json([
             ...$summary,
-            'sectionSubjects' => $section->sectionSubjects()->with(['subject', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
+            'sectionSubjects' => $section->sectionSubjects()->with(['subject.recommendedRooms:id', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
             'schedule_version' => $section->fresh()->schedule_version,
         ]);
     }
@@ -2622,7 +2647,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
             'message' => $cleared > 0
                 ? "{$cleared} auto-generated ".($cleared === 1 ? 'schedule was' : 'schedules were')." cleared."
                 : 'No auto-generated schedules to clear.',
-            'sectionSubjects' => $section->sectionSubjects()->with(['subject', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
+            'sectionSubjects' => $section->sectionSubjects()->with(['subject.recommendedRooms:id', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
             'schedule_version' => $section->fresh()->schedule_version,
         ]);
     }
@@ -2714,7 +2739,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
             'message' => $cleared > 0
                 ? "{$cleared} ".($cleared === 1 ? 'subject was' : 'subjects were')." cleared back to blank."
                 : 'Nothing to clear.',
-            'sectionSubjects' => $section->sectionSubjects()->with(['subject', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
+            'sectionSubjects' => $section->sectionSubjects()->with(['subject.recommendedRooms:id', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
             'schedule_version' => $section->fresh()->schedule_version,
         ]);
     }
@@ -2856,7 +2881,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 // since a batch save can persist rows that never went
                 // through the single-cell endpoint (e.g. Auto Generate
                 // results accepted as-is).
-                if ($room && $room->room_type && empty($rowData['room_type_confirmed'])) {
+                if ($room && $room->room_type && empty($rowData['room_type_confirmed']) && ! $this->isAdminOverrideRoom($room, $subject->subject)) {
                     $wantsLaboratory = (int) $subject->subject->laboratory_hours > 0;
                     $typeMismatch = $wantsLaboratory
                         ? $room->room_type !== 'Laboratory'
@@ -3166,7 +3191,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
         }
 
         $fresh = $section->sectionSubjects()
-            ->with(['subject', 'faculty', 'room', 'mergedInto.section:id,section_code'])
+            ->with(['subject.recommendedRooms:id', 'faculty', 'room', 'mergedInto.section:id,section_code'])
             ->whereIn('id', $rowIds)
             ->get();
 
@@ -3467,10 +3492,22 @@ class SectionSubjectController extends Controller implements HasMiddleware
             // end_time exactly as they were — the Registrar re-checks
             // those afterward on the (now shorter) hours this row
             // covers, same as any other manual schedule edit.
+            //
+            // hours_confirmed carries over the split-total warning the
+            // Registrar already confirmed (if any) — see
+            // StoreSectionSubjectSplitRequest — so the row doesn't
+            // immediately re-trip the Weekly Hours Mismatch check the
+            // moment the split is saved. It still resets to false the
+            // next time Days/Start/End Time actually change on this
+            // row (same as any other manual edit — see
+            // onDaysChange/onStartTimeChange/onEndTimeChange in
+            // Show.vue), so a genuinely new mismatch always
+            // re-surfaces.
             $subject->update([
                 'component' => 'laboratory',
                 'delivery_mode' => 'face_to_face',
                 'split_hours' => $validated['f2f_hours'],
+                'hours_confirmed' => $validated['hours_confirmed'] ?? false,
             ]);
 
             // The Online half is a brand-new row. Days/Time are left
@@ -3506,6 +3543,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 'capacity' => $subject->capacity,
                 'status' => 'Draft',
                 'edp_code' => $subject->edp_code,
+                'hours_confirmed' => $validated['hours_confirmed'] ?? false,
             ]);
 
             $onlineRow->setRelation('section', $section->loadMissing('major'));

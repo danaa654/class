@@ -11,6 +11,7 @@ use App\Models\SchoolYear;
 use App\Models\Section;
 use App\Models\SectionSubject;
 use App\Models\Semester;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -347,7 +348,36 @@ class ReportsService
 
     private function scheduleByFaculty(array $filters): array
     {
-        $query = $this->sectionSubjectsQuery($filters)
+        $facultyIds = $filters['faculty_id'] ?? null;
+
+        // FIX (cross-College faculty schedule truncated for a
+        // College-scoped Dean/OIC) — one or more SPECIFIC faculty
+        // members explicitly picked here means "print/email THIS
+        // person's (or these people's) complete schedule", the exact
+        // same full picture their own Faculty Workload tab already
+        // shows a Dean/OIC for their own faculty — including subjects
+        // taught outside the Dean's own College (e.g. a CCS-home
+        // faculty also carrying a GenEd/minor load under CTE).
+        // ReportsController::buildFilters() forcibly pins college_id
+        // to a College-scoped Dean/OIC's own College for every report
+        // type (correct for the "browse everyone's schedule, no
+        // faculty picked" flavor of this same report, where college_id
+        // legitimately means "sections belonging to my College" via
+        // sectionsQuery()). But sectionSubjectsQuery() applies that
+        // same college_id as a SECTION filter, so once a specific
+        // faculty is picked it was silently discarding that faculty's
+        // own sections that happen to sit in a different College —
+        // dropping rows from the printed table AND (since deansForColleges()
+        // below is derived from this exact same $sectionSubjects
+        // collection) collapsing "Noted by" down to only the Dean of
+        // the still-visible College. Stripping college_id from the
+        // section query whenever specific faculty are named fixes both
+        // at once, without touching the "no faculty picked" browsing
+        // mode's existing College scoping.
+        $hasExplicitFaculty = (is_array($facultyIds) && ! empty($facultyIds)) || (! is_array($facultyIds) && ! empty($facultyIds));
+        $sectionQueryFilters = $hasExplicitFaculty ? Arr::except($filters, ['college_id']) : $filters;
+
+        $query = $this->sectionSubjectsQuery($sectionQueryFilters)
             // FIX (cross-section merge visibility) — same fix already
             // applied in FacultyWorkloadService::assignedPlacements():
             // whereNull('merged_into_section_subject_id') used to be
@@ -377,12 +407,14 @@ class ReportsService
             // different college but happen to teach a CCS section.
             // sectionSubjectsQuery() already scopes to CCS *sections*
             // via sectionsQuery()'s college_id clause; this adds the
-            // faculty-side constraint on top of that.
+            // faculty-side constraint on top of that. Only meaningful
+            // in the "no specific faculty picked" browsing mode — see
+            // $hasExplicitFaculty above — since college_id is stripped
+            // from $sectionQueryFilters (and therefore has no effect
+            // here) whenever specific faculty are named.
             ->when($filters['college_id'] ?? null, function ($q, $collegeId) {
                 $q->whereHas('faculty', fn ($fq) => $fq->where('college_id', $collegeId));
             });
-
-        $facultyIds = $filters['faculty_id'] ?? null;
 
         if (is_array($facultyIds) && ! empty($facultyIds)) {
             $query->whereIn('faculty_id', $facultyIds);
