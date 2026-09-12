@@ -65,6 +65,30 @@ class AccessScope
     }
 
     /**
+     * Whether $user may use the "Viewing Academic Term" switch (see
+     * App\Support\ViewingTerm) — i.e. personally browse the app as if
+     * a different, non-Active term were current, without touching the
+     * real system-wide Active term.
+     *
+     * Originally Administrator/Registrar only. Extended to Dean/OIC
+     * and Assistant Dean so they can start planning/building sections
+     * for an upcoming term while the current one is still live — this
+     * is safe because their view of ANY term is already independently
+     * scoped to their own College (Dean/OIC) or GenEd/Minor resources
+     * (Assistant Dean) everywhere the switch actually matters
+     * (Sections, Reports, Scheduling, etc. — see e.g.
+     * ReportsController::buildFilters()'s "NEVER trust an arbitrary
+     * college_id" rule). Switching WHICH TERM they see never widens
+     * WHICH COLLEGE's data they see.
+     */
+    public static function canSwitchViewingTerm(?User $user): bool
+    {
+        return self::isUnrestricted($user)
+            || self::isCollegeScoped($user)
+            || self::isAssistantDean($user);
+    }
+
+    /**
      * The College id a Dean/OIC is restricted to, or null if the user
      * is not College-scoped (or unrestricted / Assistant Dean).
      */

@@ -145,7 +145,8 @@ class HandleInertiaRequests extends Middleware
             // "Planning").
             'isViewingOverride' => fn () => ViewingTerm::isDeviatingFromActive($request),
             // Whether this user is even allowed to use the switch
-            // (Administrator/Registrar only) — gates showing the
+            // (Administrator/Registrar/Dean/OIC/Assistant Dean — see
+            // AccessScope::canSwitchViewingTerm()) — gates showing the
             // dropdown affordance at all in the header.
             'canSwitchViewingTerm' => fn () => ViewingTerm::canSwitch($user),
             // Every switchable (non-Archived) Academic Term, for the

@@ -9,7 +9,8 @@ use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 
 /**
- * Lets an Administrator/Registrar switch which Academic Term THEY
+ * Lets an Administrator/Registrar/Dean/OIC/Assistant Dean switch which
+ * Academic Term THEY
  * personally see across the app (Dashboard, Reports, Settings,
  * Sections defaulting, etc.) without changing the real system-wide
  * Active term or affecting any other user.
@@ -22,11 +23,11 @@ class ViewingTermController extends Controller
 {
     /**
      * Switch the current user's session to view the given Academic
-     * Term. Only Administrator/Registrar may do this (spec: "the
-     * admin and registrar only") — anyone else hitting this route
-     * directly is rejected, not silently ignored, so a scripted
-     * request can't quietly succeed for a role that shouldn't have
-     * this ability.
+     * Term. Only a role AccessScope::canSwitchViewingTerm() allows may
+     * do this (Administrator/Registrar/Dean/OIC/Assistant Dean) —
+     * anyone else hitting this route directly is rejected, not
+     * silently ignored, so a scripted request can't quietly succeed
+     * for a role that shouldn't have this ability.
      *
      * An Archived term can't be switched to — it's closed history,
      * not something to actively "view" as a working context.
@@ -34,7 +35,7 @@ class ViewingTermController extends Controller
     public function update(Request $request): RedirectResponse
     {
         if (! ViewingTerm::canSwitch($request->user())) {
-            abort(403, 'Only an Administrator or Registrar may switch the viewing academic term.');
+            abort(403, 'Your role is not permitted to switch the viewing academic term.');
         }
 
         $validated = $request->validate([
@@ -63,7 +64,7 @@ class ViewingTermController extends Controller
     public function destroy(Request $request): RedirectResponse
     {
         if (! ViewingTerm::canSwitch($request->user())) {
-            abort(403, 'Only an Administrator or Registrar may switch the viewing academic term.');
+            abort(403, 'Your role is not permitted to switch the viewing academic term.');
         }
 
         ViewingTerm::clear($request);

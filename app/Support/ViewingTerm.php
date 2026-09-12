@@ -8,15 +8,15 @@ use Illuminate\Http\Request;
 
 /**
  * Resolves the per-user "Viewing Academic Term" — a session-scoped
- * override that lets an Administrator/Registrar browse the app as if
- * a different (non-Active) Academic Term were current, WITHOUT
- * touching that term's real `status` column or affecting any other
- * user's session.
+ * override that lets an Administrator/Registrar/Dean/OIC/Assistant
+ * Dean browse the app as if a different (non-Active) Academic Term
+ * were current, WITHOUT touching that term's real `status` column or
+ * affecting any other user's session.
  *
- * Only Administrator/Registrar may set this override (see
- * AccessScope::isUnrestricted()) — every other role always resolves
- * straight to the real Active term, same as before this feature
- * existed. This is intentionally a SESSION value, not a users-table
+ * Only roles AccessScope::canSwitchViewingTerm() allows may set this
+ * override — every other role always resolves straight to the real
+ * Active term, same as before this feature existed. This is
+ * intentionally a SESSION value, not a users-table
  * column: it's a "what am I looking at right now" browsing
  * preference, not a durable account setting, so it naturally resets
  * to the real Active term on a fresh login/device.
@@ -113,7 +113,7 @@ class ViewingTerm
     {
         $user = $request->user();
 
-        if (! AccessScope::isUnrestricted($user)) {
+        if (! AccessScope::canSwitchViewingTerm($user)) {
             return null;
         }
 
@@ -188,6 +188,6 @@ class ViewingTerm
     /** Whether $user is allowed to use the term switch at all. */
     public static function canSwitch(?User $user): bool
     {
-        return AccessScope::isUnrestricted($user);
+        return AccessScope::canSwitchViewingTerm($user);
     }
 }

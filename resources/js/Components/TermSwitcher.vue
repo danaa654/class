@@ -3,7 +3,8 @@
  * Header pill showing the Academic Term the current user is viewing.
  *
  * For most roles this is just a read-only label (same as before).
- * For Administrator/Registrar (canSwitch), it becomes a dropdown that
+ * For Administrator/Registrar/Dean/OIC/Assistant Dean (canSwitch), it
+ * becomes a dropdown that
  * lets THEM personally switch which term they're browsing — Dashboard,
  * Reports, Sections defaults, etc. all follow their choice — WITHOUT
  * changing the real system-wide Active term or affecting any other
