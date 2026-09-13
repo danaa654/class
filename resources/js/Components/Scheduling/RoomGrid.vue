@@ -641,11 +641,18 @@ const writeSchedule = async (subjectId, payload, { successMessage, crossSection 
             // silently move/overwrite anything; tell the parent so it
             // can mark the whole page stale, and resync this grid to
             // whatever the server actually has now.
+            //
+            // ACTOR-AWARE (bug fix — "false 'another user' conflict")
+            // — data.message is now phrased by the backend based on
+            // whether this was genuinely another user or the same
+            // user's own other tab/request racing this one (see
+            // ScheduleVersionConflictException::$updatedBy). Using it
+            // directly avoids re-hardcoding "another user" here.
             emit('schedule-stale', data.current_version ?? null);
             toast.add({
                 severity: 'error',
                 summary: 'Save prevented',
-                detail: 'Your schedule is outdated because another user made a change. Please refresh and try again.',
+                detail: data.message ?? 'Your schedule is outdated. Please refresh and try again.',
                 life: 7000,
             });
             await loadRoomSchedule(selectedRoom.value);

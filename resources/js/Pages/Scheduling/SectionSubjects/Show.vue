@@ -2175,10 +2175,19 @@ const saveSchedule = async () => {
             }
             schedulePolling.isStale.value = true;
 
+            // ACTOR-AWARE (bug fix — "false 'another user' conflict")
+            // — the backend now distinguishes a genuine other-user
+            // collision from the SAME user's own other tab/request
+            // racing this one (see ScheduleVersionConflictException's
+            // updatedBy), and phrases `data.message` accordingly.
+            // Using it directly here (rather than a hardcoded
+            // "Another user changed..." string) keeps this toast in
+            // sync with that distinction instead of re-duplicating —
+            // and risking re-diverging from — the same logic.
             toast.add({
                 severity: 'error',
                 summary: 'Save prevented',
-                detail: 'Another user changed this schedule while you were editing. Refresh to see the latest version, then re-apply your changes.',
+                detail: data.message ?? 'Schedule has changed since it was loaded. Refresh to see the latest version, then re-apply your changes.',
                 life: 8000,
             });
             savingSchedule.value = false;
@@ -2669,10 +2678,13 @@ const runAutoGenerate = async () => {
         if (response.status === 409 && data.code === 'SCHEDULE_VERSION_CONFLICT') {
             if (typeof data.current_version === 'number') schedulePolling.backendVersion.value = data.current_version;
             schedulePolling.isStale.value = true;
+            // ACTOR-AWARE (bug fix — "false 'another user' conflict")
+            // — see the matching comment on the batch-save 409 handler
+            // above.
             toast.add({
                 severity: 'error',
                 summary: 'Schedule changed',
-                detail: 'Another user changed this schedule. Please refresh before running Auto Schedule.',
+                detail: data.message ?? 'Schedule has changed. Please refresh before running Auto Schedule.',
                 life: 7000,
             });
             return;
@@ -2721,10 +2733,13 @@ const regenerateAutoSchedule = async () => {
         if (response.status === 409 && data.code === 'SCHEDULE_VERSION_CONFLICT') {
             if (typeof data.current_version === 'number') schedulePolling.backendVersion.value = data.current_version;
             schedulePolling.isStale.value = true;
+            // ACTOR-AWARE (bug fix — "false 'another user' conflict")
+            // — see the matching comment on the batch-save 409 handler
+            // above.
             toast.add({
                 severity: 'error',
                 summary: 'Schedule changed',
-                detail: 'Another user changed this schedule. Please refresh before regenerating.',
+                detail: data.message ?? 'Schedule has changed. Please refresh before regenerating.',
                 life: 7000,
             });
             return;

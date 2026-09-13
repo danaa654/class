@@ -11,8 +11,6 @@ use App\Models\SectionSubject;
 use App\Support\ViewingTerm;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Log;
 
 /**
  * All Section / Faculty / Room / Time-overlap conflict-detection logic
@@ -695,19 +693,11 @@ class ScheduleConflictService
         }
 
         if ((int) $lockedSection->schedule_version !== (int) $expectedVersion) {
-            // TEMPORARY DIAGNOSTIC LOGGING — see the matching block in
-            // bumpScheduleVersion() below. Remove/reduce both once the
-            // false-conflict issue is confirmed fixed in production.
-            Log::info('[ScheduleVersionConflict]', [
-                'section' => $lockedSection->id,
-                'expected' => (int) $expectedVersion,
-                'current' => (int) $lockedSection->schedule_version,
-                'user' => Auth::id(),
-                'updated_by' => $lockedSection->schedule_version_updated_by,
-                'endpoint' => request()?->path(),
-            ]);
-
-            throw new ScheduleVersionConflictException((int) $lockedSection->schedule_version, $expectedVersion);
+            throw new ScheduleVersionConflictException(
+                (int) $lockedSection->schedule_version,
+                $expectedVersion,
+                $lockedSection->schedule_version_updated_by,
+            );
         }
     }
 
@@ -744,17 +734,6 @@ class ScheduleConflictService
 
         $section->increment('schedule_version', 1, [
             'schedule_version_updated_by' => $userId,
-        ]);
-
-        // TEMPORARY DIAGNOSTIC LOGGING — makes it immediately obvious,
-        // per-request, who advanced the version and to what — remove
-        // or reduce once the false "another user" conflict issue is
-        // confirmed fixed in production.
-        Log::info('[ScheduleVersion]', [
-            'section' => $section->id,
-            'new_version' => $section->schedule_version,
-            'updated_by' => $userId,
-            'endpoint' => request()?->path(),
         ]);
     }
 

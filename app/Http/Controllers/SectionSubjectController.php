@@ -1313,23 +1313,35 @@ class SectionSubjectController extends Controller implements HasMiddleware
         } catch (ScheduleConflictAbort $abort) {
             return response()->json(['errors' => $abort->errors], 422);
         } catch (ScheduleVersionConflictException $conflict) {
-            // SCHEDULING NOTIFICATION SYSTEM (audit spec Section 4) —
-            // a genuine race: another user's save committed between
-            // this request loading the row and it trying to write.
-            // Admin/Registrar only, deduplicated per Section by the
-            // same 5s window every other notification uses, so a
-            // burst of retries against the same busy row doesn't fan
-            // out into a wall of alerts.
-            $this->notifications->concurrencyConflict(
-                $subject->section ?? $subject->section()->first(),
-                $request->user(),
-                "Schedule conflict on {$subject->section?->section_code}: another user saved a change to this section's schedule first."
-            );
+            // ACTOR-AWARE (bug fix — "false 'another user' conflict")
+            // — a version mismatch caused by the SAME user's own other
+            // tab/request/retry racing this one is a genuine conflict
+            // (nothing was silently overwritten, the caller still
+            // needs to refresh and re-apply), but it is NOT "another
+            // user" and must not fire the Admin/Registrar concurrency
+            // alert, which exists specifically to flag a collision
+            // between two different people. Mirrors the same
+            // updated_by-vs-current-user comparison
+            // useSchedulePolling.js's polling tick already performs on
+            // the frontend.
+            $sameActor = $conflict->updatedBy !== null && $conflict->updatedBy === $request->user()?->id;
+
+            if (! $sameActor) {
+                $this->notifications->concurrencyConflict(
+                    $subject->section ?? $subject->section()->first(),
+                    $request->user(),
+                    "Schedule conflict on {$subject->section?->section_code}: another user saved a change to this section's schedule first."
+                );
+            }
 
             return response()->json([
-                'message' => 'Schedule has changed since it was loaded. Please refresh the schedule and try again.',
+                'message' => $sameActor
+                    ? 'This schedule was already updated by one of your other open tabs/sessions. Refresh to see the latest version, then re-apply your changes.'
+                    : 'Schedule has changed since it was loaded. Please refresh the schedule and try again.',
                 'code' => 'SCHEDULE_VERSION_CONFLICT',
                 'current_version' => $conflict->currentVersion,
+                'updated_by' => $conflict->updatedBy,
+                'same_actor' => $sameActor,
             ], 409);
         } catch (SectionFinalizedException $finalized) {
             return response()->json([
@@ -2561,10 +2573,16 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 $request->user()
             );
         } catch (ScheduleVersionConflictException $conflict) {
+            $sameActor = $conflict->updatedBy !== null && $conflict->updatedBy === $request->user()?->id;
+
             return response()->json([
-                'message' => 'Schedule has changed since it was loaded. Please refresh the schedule and try again.',
+                'message' => $sameActor
+                    ? 'This schedule was already updated by one of your other open tabs/sessions. Refresh to see the latest version, then re-apply your changes.'
+                    : 'Schedule has changed since it was loaded. Please refresh the schedule and try again.',
                 'code' => 'SCHEDULE_VERSION_CONFLICT',
                 'current_version' => $conflict->currentVersion,
+                'updated_by' => $conflict->updatedBy,
+                'same_actor' => $sameActor,
             ], 409);
         } catch (SectionFinalizedException $finalized) {
             return response()->json([
@@ -3170,10 +3188,16 @@ class SectionSubjectController extends Controller implements HasMiddleware
         } catch (ScheduleVersionConflictException $conflict) {
             DB::rollBack();
 
+            $sameActor = $conflict->updatedBy !== null && $conflict->updatedBy === $request->user()?->id;
+
             return response()->json([
-                'message' => 'Schedule has changed since it was loaded. Please refresh the schedule and try again.',
+                'message' => $sameActor
+                    ? 'This schedule was already updated by one of your other open tabs/sessions. Refresh to see the latest version, then re-apply your changes.'
+                    : 'Schedule has changed since it was loaded. Please refresh the schedule and try again.',
                 'code' => 'SCHEDULE_VERSION_CONFLICT',
                 'current_version' => $conflict->currentVersion,
+                'updated_by' => $conflict->updatedBy,
+                'same_actor' => $sameActor,
             ], 409);
         } catch (SectionFinalizedException $finalized) {
             DB::rollBack();
