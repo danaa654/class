@@ -209,7 +209,7 @@ function goToActivityLogPage(page) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Manage Account (Registrar / Dean / OIC / Assistant Dean)            */
+/* Manage Account (all roles, incl. Administrator)                     */
 /* ------------------------------------------------------------------ */
 const accountForm = useForm({
     first_name: page.props.auth?.user?.first_name ?? '',
@@ -304,7 +304,7 @@ const onUpdateAccount = () => {
                     <Tab v-if="has('system') && isAdministrator" value="activeSessions">Active Sessions</Tab>
                     <Tab v-if="has('activityLog')" value="activityLog">Activity Log</Tab>
                     <Tab v-if="has('system')" value="system">System</Tab>
-                    <Tab v-if="!isAdministrator" value="account">Manage Account</Tab>
+                    <Tab value="account">Manage Account</Tab>
                 </TabList>
 
                 <TabPanels>
@@ -647,7 +647,7 @@ const onUpdateAccount = () => {
                         </div>
                     </TabPanel>
 
-                    <TabPanel v-if="!isAdministrator" value="account">
+                    <TabPanel value="account">
                         <div class="neu-card rounded-2xl p-6 transition-colors duration-300 max-w-2xl">
                         <Card class="!rounded-2xl !bg-transparent !border-0 !shadow-none" :pt="{ body: { class: '!bg-transparent !p-0' } }">
                             <template #content>

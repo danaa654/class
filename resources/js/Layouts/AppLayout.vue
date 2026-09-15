@@ -285,7 +285,10 @@ const isActive = (routeName) => {
 
             <!-- User / Logout footer -->
             <div v-if="user" class="w-[200px] shrink-0 px-2 pb-3 pt-2">
-                <div class="neu-navy-inset neu-user-card flex items-center gap-2.5 rounded-xl px-2.5 py-2.5 transition-all duration-200">
+                <Link
+                    :href="`${route('settings')}?tab=account`"
+                    class="neu-navy-inset neu-user-card neu-user-card--linked flex items-center gap-2.5 rounded-xl px-2.5 py-2.5 transition-all duration-200 cursor-pointer"
+                >
                     <span v-if="user.profile_photo_url" class="h-8 w-8 shrink-0 overflow-hidden rounded-full">
                         <img :src="user.profile_photo_url" alt="Profile photo" class="h-full w-full object-cover" />
                     </span>
@@ -296,7 +299,7 @@ const isActive = (routeName) => {
                         <p class="truncate text-[13px] font-semibold text-white">{{ user.name }}</p>
                         <p v-if="authRoles.length" class="truncate text-[11px] text-slate-400">{{ authRoles.join(', ') }}</p>
                     </div>
-                </div>
+                </Link>
                 <Link
                     :href="route('logout')"
                     method="post"
@@ -332,9 +335,20 @@ const isActive = (routeName) => {
     display: none; /* Chrome/Safari/Edge Chromium */
 }
 
-/* Sidebar footer hover states — flat, no glow */
+/* Sidebar footer hover states */
 .neu-user-card:hover {
     background: #0A1538;
+}
+
+/* Manage Account link — glows green on hover to signal it's clickable */
+.neu-user-card--linked:hover {
+    background: #0A1538;
+    box-shadow:
+        0 0 0 1px rgba(34, 197, 94, 0.45),
+        0 0 14px 2px rgba(34, 197, 94, 0.35);
+}
+.neu-user-card--linked:hover :deep(p:first-child) {
+    color: #4ADE80;
 }
 
 .neu-logout-btn:hover {
