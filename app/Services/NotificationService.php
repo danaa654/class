@@ -6,6 +6,7 @@ use App\Models\Faculty;
 use App\Models\FacultyRequest;
 use App\Models\Notification;
 use App\Models\ScheduleAuditLog;
+use App\Models\AcademicTerm;
 use App\Models\Section;
 use App\Models\SectionSubject;
 use App\Models\FacultyLoadRequest;
@@ -59,7 +60,19 @@ class NotificationService
 
     public const TYPE_SECTION_CREATED = 'SECTION_CREATED';
 
+    // A new Academic Term (School Year + Semester) was created — see
+    // termCreated(). Institution-wide, not Section-scoped, so every
+    // College's Dean/OIC/Assistant Dean can start planning ahead of
+    // the term going Active.
+    public const TYPE_TERM_CREATED = 'TERM_CREATED';
+
     public const TYPE_SUBJECT_ADDED = 'SUBJECT_ADDED';
+
+    // Multiple Subjects attached to a Section in one operation (e.g.
+    // the Add Section modal's up-front Subjects step, or curriculum
+    // generation) — one summary notification instead of one per
+    // Subject. See subjectsAddedBatch().
+    public const TYPE_SUBJECTS_ADDED_BATCH = 'SUBJECTS_ADDED_BATCH';
 
     public const TYPE_SUBJECT_REMOVED = 'SUBJECT_REMOVED';
 
@@ -240,6 +253,52 @@ class NotificationService
     }
 
     /**
+     * A new Academic Term (School Year + Semester) was created via
+     * Term Setup. Unlike Section-scoped notifications (recipientsFor()),
+     * a Term isn't tied to one College — every College's Dean/OIC/
+     * Assistant Dean is affected, since it's what they'll eventually
+     * schedule against. Notifies them plus Admin/Registrar (in case
+     * the Term was created by an Assistant Dean or similar) so
+     * everyone can start planning ahead of the Term going Active.
+     */
+    public function termCreated(AcademicTerm $term, User $actor): void
+    {
+        $term->loadMissing('schoolYear', 'semester');
+        $label = "{$term->schoolYear?->start_year}-{$term->schoolYear?->end_year} • {$term->semester?->name}";
+
+        $recipients = User::query()
+            ->role([...AccessScope::COLLEGE_SCOPED_ROLES, AccessScope::ASSISTANT_DEAN_ROLE])
+            ->get()
+            ->concat($this->adminRecipients())
+            ->unique('id')
+            ->reject(fn (User $u) => $u->is($actor))
+            ->values();
+
+        foreach ($recipients as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_TERM_CREATED,
+                priority: self::PRIORITY_INFO,
+                title: 'Academic Term Created',
+                message: "{$label} was created by {$actor->full_name}.",
+                data: [
+                    'academic_term_id' => $term->id,
+                    'label' => $label,
+                    'status' => $term->status,
+                ],
+            );
+        }
+
+        $this->activityLog->record(
+            ActivityLogService::TERM_CREATED,
+            "Academic Term Created: {$label} was added by {$actor->full_name}.",
+            $term,
+            $actor,
+        );
+    }
+
+    /**
      * A Subject was added to a Section (manually, or via curriculum
      * generation). Spec Section 6. Notifies Dean/OIC.
      */
@@ -258,6 +317,35 @@ class NotificationService
             data: ['section_code' => $section->section_code, 'subject_code' => $subjectCode],
             auditAction: 'SUBJECT_ADDED',
             sectionSubject: $sectionSubject,
+        );
+    }
+
+    /**
+     * Several Subjects were added to a Section in a single operation
+     * (e.g. the Add Section modal's up-front Subjects step). Fires
+     * one summary notification/audit row instead of one per Subject,
+     * so attaching a full curriculum's worth of subjects doesn't
+     * flood the Dean/OIC's notification bell. Callers with exactly
+     * one Subject should use subjectAdded() instead so the recipient
+     * sees which specific subject it was.
+     */
+    public function subjectsAddedBatch(Section $section, int $count, User $actor): void
+    {
+        if ($count < 1) {
+            // Nothing to report — mirrors autoScheduleFinished()'s
+            // no-op guard above (spec Section 1).
+            return;
+        }
+
+        $this->dispatch(
+            section: $section,
+            actor: $actor,
+            type: self::TYPE_SUBJECTS_ADDED_BATCH,
+            priority: self::PRIORITY_IMPORTANT,
+            title: 'Subjects Added',
+            message: "{$count} subjects were added to {$section->section_code} by {$actor->full_name}.",
+            data: ['section_code' => $section->section_code, 'subject_count' => $count],
+            auditAction: 'SUBJECT_ADDED',
         );
     }
 
@@ -1032,11 +1120,18 @@ class NotificationService
         // DUPLICATE-NOTIFICATION GUARD (spec Section 17) — a
         // double-click, network retry, or duplicate frontend request
         // for the exact same logical operation (same Section, same
-        // type, same actor) within a short window must not fan out
-        // into repeated notifications/audit rows. A real second
-        // finalize/unlock/update a few seconds later is vanishingly
-        // unlikely and, if it happens, is itself worth deduping.
-        if ($this->isRecentDuplicate($section, $type, $actor)) {
+        // type, same actor, same SectionSubject when one applies)
+        // within a short window must not fan out into repeated
+        // notifications/audit rows. A real second finalize/unlock/
+        // update a few seconds later is vanishingly unlikely and, if
+        // it happens, is itself worth deduping.
+        //
+        // $sectionSubject is included in the match so that looping
+        // over several subjects (e.g. attachSubjectsToSection()
+        // calling subjectAdded() once per subject) doesn't have every
+        // subject after the first silently dropped as a "duplicate"
+        // of the same section+type+actor within the 5-second window.
+        if ($this->isRecentDuplicate($section, $type, $actor, $sectionSubject)) {
             return;
         }
 
@@ -1114,12 +1209,13 @@ class NotificationService
         }
     }
 
-    private function isRecentDuplicate(Section $section, string $type, User $actor): bool
+    private function isRecentDuplicate(Section $section, string $type, User $actor, ?SectionSubject $sectionSubject = null): bool
     {
         return Notification::query()
             ->where('section_id', $section->id)
             ->where('type', $type)
             ->where('actor_user_id', $actor->id)
+            ->where('section_subject_id', $sectionSubject?->id)
             ->where('created_at', '>=', now()->subSeconds(5))
             ->exists();
     }

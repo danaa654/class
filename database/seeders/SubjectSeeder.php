@@ -46,7 +46,7 @@ use Illuminate\Database\Seeder;
  *      group — genuinely institution-wide, no single Major (or even
  *      College) owns them, so they're seeded with no linked Major and
  *      college_id left null.
- *    - tourismHospitalityShared() sets an explicit 'group' => ['BSTM',
+ *    - tourismHospitalityShared() sets an explicit 'group' => ['TM',
  *      'BSHM'] array per row; bscrimShared() is tagged with all four
  *      BSCRIM specialization codes (two of its rows — FORENSIC4 and
  *      FORENSIC6 — override that with their own smaller 'group'
@@ -90,23 +90,23 @@ class SubjectSeeder extends Seeder
             // group here is moot; kept null for clarity.
             $this->tag($this->generalEducationAndMinors(), null),
             // Every row in tourismHospitalityShared() sets its own explicit
-            // 'group' => ['BSTM', 'BSHM'] array — tag()'s fallback is never
+            // 'group' => ['TM', 'HM'] array — tag()'s fallback is never
             // actually used for this catalog.
             $this->tag($this->tourismHospitalityShared(), null),
-            $this->tag($this->bstmOnly(), 'BSTM'),
-            $this->tag($this->bshmOnly(), 'BSHM'),
-            $this->tag($this->bsitOnly(), 'BSIT'),
-            $this->tag($this->bsedOnly(), 'BSED'),
+            $this->tag($this->bstmOnly(), 'TM'),
+            $this->tag($this->bshmOnly(), 'HM'),
+            $this->tag($this->bsitOnly(), 'IT'),
+            $this->tag($this->bsedOnly(), 'ED'),
             // Shared across all four BSCRIM specializations — Questioned
             // Documents, Fingerprint, Firearms/Ballistics, and Lie
             // Detection all require these, so every row is linked to all
             // four Majors (two rows below override this with a smaller
             // subset — see their inline comments).
-            $this->tag($this->bscrimShared(), ['BSCRIMQD', 'BSCRIMFI', 'BSCRIMFB', 'BSCRIMLD']),
-            $this->tag($this->bscrimQuestionedDocuments(), 'BSCRIMQD'),
-            $this->tag($this->bscrimFingerprint(), 'BSCRIMFI'),
-            $this->tag($this->bscrimFirearms(), 'BSCRIMFB'),
-            $this->tag($this->bscrimLieDetection(), 'BSCRIMLD'),
+            $this->tag($this->bscrimShared(), ['QD', 'FI', 'FB', 'LD']),
+            $this->tag($this->bscrimQuestionedDocuments(), 'QD'),
+            $this->tag($this->bscrimFingerprint(), 'FI'),
+            $this->tag($this->bscrimFirearms(), 'FB'),
+            $this->tag($this->bscrimLieDetection(), 'LD'),
         );
 
         $unmatchedMajorCodes = [];
@@ -250,41 +250,41 @@ class SubjectSeeder extends Seeder
     private function tourismHospitalityShared(): array
     {
         return [
-            ['code' => 'BC1',  'title' => 'Operation Management',                                            'lec' => 2, 'lab' => 3, 'units' => 3, 'major' => true, 'room' => 'Any',     'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'BC2',  'title' => 'Strategic Management',                                             'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => 'BC1'],
+            ['code' => 'BC1',  'title' => 'Operation Management',                                            'lec' => 2, 'lab' => 3, 'units' => 3, 'major' => true, 'room' => 'Any',     'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'BC2',  'title' => 'Strategic Management',                                             'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => 'BC1'],
 
-            ['code' => 'THC1', 'title' => 'Micro Perspective of Tourism and Hospitality',                     'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'THC2', 'title' => 'Risk Management as Applied to Safety, Security and Sanitation',    'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'THC3', 'title' => 'Philippine Culture and Tourism Geography',                         'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'THC4', 'title' => 'Quality Service Management in Tourism',                            'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'THC5', 'title' => 'Professional Development and Applied Ethics',                      'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'THC6', 'title' => 'Entrepreneurship in Tourism and Hospitality',                      'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'THC7', 'title' => 'Legal Aspects in Tourism and Hospitality',                         'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'THC8', 'title' => 'Multi-cultural Diversity in Workplace for Tourism Professionals',  'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'THC9', 'title' => 'Macro Perspective of Tourism and Hospitality',                     'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => 'THC1'],
-            ['code' => 'THC10','title' => 'Tourism and Hospitality Marketing',                                'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
+            ['code' => 'THC1', 'title' => 'Micro Perspective of Tourism and Hospitality',                     'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'THC2', 'title' => 'Risk Management as Applied to Safety, Security and Sanitation',    'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'THC3', 'title' => 'Philippine Culture and Tourism Geography',                         'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'THC4', 'title' => 'Quality Service Management in Tourism',                            'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'THC5', 'title' => 'Professional Development and Applied Ethics',                      'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'THC6', 'title' => 'Entrepreneurship in Tourism and Hospitality',                      'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'THC7', 'title' => 'Legal Aspects in Tourism and Hospitality',                         'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'THC8', 'title' => 'Multi-cultural Diversity in Workplace for Tourism Professionals',  'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'THC9', 'title' => 'Macro Perspective of Tourism and Hospitality',                     'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => 'THC1'],
+            ['code' => 'THC10','title' => 'Tourism and Hospitality Marketing',                                'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
 
-            ['code' => 'FLT1', 'title' => 'Aircraft Familiarization',                                          'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'FLT2', 'title' => 'Airport and Airline Operation Practices',                           'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => 'FLT1'],
-            ['code' => 'FLT3', 'title' => 'Emergency Procedures and Equipment',                                'lec' => 2, 'lab' => 3, 'units' => 3, 'major' => true, 'room' => 'Any',     'group' => ['BSTM', 'BSHM'], 'prereq' => 'FLT2'],
-            ['code' => 'FLT4', 'title' => 'Air Laws and Regulations',                                          'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => 'FLT2'],
+            ['code' => 'FLT1', 'title' => 'Aircraft Familiarization',                                          'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'FLT2', 'title' => 'Airport and Airline Operation Practices',                           'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => 'FLT1'],
+            ['code' => 'FLT3', 'title' => 'Emergency Procedures and Equipment',                                'lec' => 2, 'lab' => 3, 'units' => 3, 'major' => true, 'room' => 'Any',     'group' => ['TM', 'HM'], 'prereq' => 'FLT2'],
+            ['code' => 'FLT4', 'title' => 'Air Laws and Regulations',                                          'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => 'FLT2'],
             // FLT5 prerequisite is "FLT 3 & 4" (multiple) — left null, see comment rule.
-            ['code' => 'FLT5', 'title' => 'In-flight Food and Beverage Services / Food Menu Theory',           'lec' => 2, 'lab' => 3, 'units' => 3, 'major' => true, 'room' => 'Any',     'group' => ['BSTM', 'BSHM'], 'prereq' => null],
+            ['code' => 'FLT5', 'title' => 'In-flight Food and Beverage Services / Food Menu Theory',           'lec' => 2, 'lab' => 3, 'units' => 3, 'major' => true, 'room' => 'Any',     'group' => ['TM', 'HM'], 'prereq' => null],
 
             // Bridging courses for non-ABM (Accountancy/Business/Management) SHS graduates.
             // Applicable to BSTM and BSHM only, same as the rest of this method — Pass 1
             // in run() inserts one pivot row per program from the explicit 'group' array.
             // lec bumped to 3 (matching every other plain 3-unit Lecture subject in this
             // catalog) so total_hours lines up with the unit count.
-            ['code' => 'NON-ABM1', 'title' => 'Business Marketing',              'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'NON-ABM2', 'title' => 'Organization and Management',     'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'NON-ABM3', 'title' => 'Fundamentals of Accounting',      'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'NON-ABM4', 'title' => 'Business Finance',                'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
-            ['code' => 'NON-ABM5', 'title' => 'Applied Economics',               'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
+            ['code' => 'NON-ABM1', 'title' => 'Business Marketing',              'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'NON-ABM2', 'title' => 'Organization and Management',     'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'NON-ABM3', 'title' => 'Fundamentals of Accounting',      'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'NON-ABM4', 'title' => 'Business Finance',                'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
+            ['code' => 'NON-ABM5', 'title' => 'Applied Economics',               'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
 
             // BSTM's "RESEARCH" and BSHM's "RESEARCH" are the same subject; BSED uses "RES" and
             // BSCRIM uses "RESEARCH1"/"RESEARCH2" — different codes, so no collision.
-            ['code' => 'RESEARCH', 'title' => 'Methods of Research',             'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['BSTM', 'BSHM'], 'prereq' => null],
+            ['code' => 'RESEARCH', 'title' => 'Methods of Research',             'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'group' => ['TM', 'HM'], 'prereq' => null],
         ];
     }
 
@@ -518,9 +518,9 @@ class SubjectSeeder extends Seeder
             ['code' => 'CDI6',  'title' => 'Fire Protection and Arson Investigation',                  'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'prereq' => null], // prereq CDI 1 & 2 (multiple)
             ['code' => 'FORENSIC5', 'title' => 'Forensic Ballistics',                                  'lec' => 2, 'lab' => 1, 'units' => 3, 'major' => true, 'room' => 'Science Laboratory', 'prereq' => null],
             // Used by QD and FI majors; skipped by FAI (own ballistics track) and LD.
-            ['code' => 'FORENSIC6', 'title' => 'Lie Detection Techniques',                             'lec' => 2, 'lab' => 1, 'units' => 3, 'major' => true, 'room' => 'Science Laboratory', 'group' => ['BSCRIMQD', 'BSCRIMFI'], 'prereq' => null],
+            ['code' => 'FORENSIC6', 'title' => 'Lie Detection Techniques',                             'lec' => 2, 'lab' => 1, 'units' => 3, 'major' => true, 'room' => 'Science Laboratory', 'group' => ['QD', 'FI'], 'prereq' => null],
             // Used by FI, FAI, and LD majors; skipped by QD (own questioned-documents track).
-            ['code' => 'FORENSIC4', 'title' => 'Questioned Documents Examination',                     'lec' => 2, 'lab' => 1, 'units' => 3, 'major' => true, 'room' => 'Science Laboratory', 'group' => ['BSCRIMFI', 'BSCRIMFB', 'BSCRIMLD'], 'prereq' => null],
+            ['code' => 'FORENSIC4', 'title' => 'Questioned Documents Examination',                     'lec' => 2, 'lab' => 1, 'units' => 3, 'major' => true, 'room' => 'Science Laboratory', 'group' => ['FI', 'FB', 'LD'], 'prereq' => null],
 
             ['code' => 'CORR3', 'title' => 'Therapeutic Modalities',                                    'lec' => 2, 'lab' => 0, 'units' => 2, 'major' => true, 'room' => 'Lecture', 'prereq' => null], // prereq CORR 1 & 2 (multiple)
             ['code' => 'LEA4',  'title' => 'Law Enforcement Operation and Planning with Crime Mapping', 'lec' => 3, 'lab' => 0, 'units' => 3, 'major' => true, 'room' => 'Lecture', 'prereq' => null], // prereq LEA 1 & 2 (multiple)

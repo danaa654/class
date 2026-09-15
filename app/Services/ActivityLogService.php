@@ -41,6 +41,12 @@ class ActivityLogService
 
     public const SECTION_CREATED = 'SECTION_CREATED';
 
+    // A new Academic Term (School Year + Semester) was created via
+    // Term Setup — see NotificationService::termCreated(). Distinct
+    // from TERM_ARCHIVED/TERM_REOPENED below, which cover the two
+    // ways an existing Term's lifecycle changes.
+    public const TERM_CREATED = 'TERM_CREATED';
+
     public const SECTION_UPDATED = 'SECTION_UPDATED';
 
     public const SECTION_DELETED = 'SECTION_DELETED';
@@ -103,6 +109,7 @@ class ActivityLogService
             self::FACULTY_DEACTIVATED,
             self::FACULTY_DELETED,
             self::SECTION_CREATED,
+            self::TERM_CREATED,
             self::SECTION_UPDATED,
             self::SECTION_DELETED,
             self::SECTION_FINALIZED,

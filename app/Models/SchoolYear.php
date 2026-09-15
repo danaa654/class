@@ -18,10 +18,16 @@ use Illuminate\Database\Eloquent\SoftDeletes;
  *     the day into when searching for candidate start times.
  *   - Available Class Days — which days of the week the engine is
  *     allowed to generate schedules on.
- *   - Lunch Break (12:00 PM - 1:00 PM) — always enforced, never
- *     editable. `lunch_start`/`lunch_end` columns exist for the
+ *   - Lunch Break (12:00 PM - 1:00 PM) — always excluded from Auto
+ *     Schedule/Regenerate and every "Recommend Day & Time" suggestion,
+ *     never editable. `lunch_start`/`lunch_end` columns exist for the
  *     record, but the scheduling engine always uses the fixed
  *     LUNCH_BREAK_START/END constants below, never the column values.
+ *     This is a SOFT exclusion from the automated engine only — a
+ *     Registrar/Dean/OIC may still manually place a class across
+ *     lunch when they genuinely need to; ScheduleConflictService::
+ *     validate() does not reject it. See overlapsLunchBreak()'s
+ *     docblock.
  *
  * These settings apply to the ACTIVE School Year only — see active().
  * RecommendationService/MeetingPatternService pull from here (falling
@@ -35,8 +41,12 @@ class SchoolYear extends Model
 
     /**
      * The Lunch Break window. Hardcoded and never user-editable — the
-     * Auto Schedule AI must never assign a class that overlaps this
-     * period, regardless of what else is configured.
+     * Auto Schedule AI and every Recommend Day/Time suggestion must
+     * never propose a class that overlaps this period, regardless of
+     * what else is configured. NOT a hard save-time block, though: a
+     * Registrar/Dean/OIC may still manually assign a class across
+     * lunch if they genuinely need to — see ScheduleConflictService::
+     * validate(), which deliberately does not check this.
      */
     public const LUNCH_BREAK_START = '12:00';
 
@@ -201,11 +211,16 @@ class SchoolYear extends Model
 
     /**
      * Whether a proposed Start/End Time falls entirely within
-     * [Class Start Time, Class End Time] and does NOT overlap the
-     * fixed Lunch Break window. This is the rule the Auto Schedule AI
-     * (and manual Registrar overrides) must never violate.
+     * [Class Start Time, Class End Time]. Lunch Break is deliberately
+     * NOT checked here — this is the hard gate ScheduleConflictService::
+     * validate() enforces on every save (manual or automated), and a
+     * Registrar/Dean/OIC must remain free to manually schedule across
+     * lunch when they need to. See isWithinSchedulingPolicy() for the
+     * combined (class hours + Lunch Break) check the automated
+     * recommendation engine uses instead, purely for scoring/
+     * candidate-filtering, never as a save-time block.
      */
-    public function isWithinSchedulingPolicy(string $startTime, string $endTime): bool
+    public function isWithinClassHours(string $startTime, string $endTime): bool
     {
         $start = $this->toMinutes($startTime);
         $end = $this->toMinutes($endTime);
@@ -214,26 +229,49 @@ class SchoolYear extends Model
             return false;
         }
 
-        if ($start < $this->toMinutes($this->classStartTime()) || $end > $this->toMinutes($this->classEndTime())) {
-            return false;
-        }
-
-        return ! self::overlapsLunchBreak($startTime, $endTime);
+        return $start >= $this->toMinutes($this->classStartTime()) && $end <= $this->toMinutes($this->classEndTime());
     }
 
     /**
-     * Lunch Break restriction removed per adviser direction — classes
-     * may now be scheduled through 12:00 PM - 1:00 PM. Always returns
-     * false so every call site that gates on this (ScheduleConflictService,
-     * RecommendationService, SectionSubjectController validation,
-     * RoomUtilizationService) stops treating that window as blocked.
-     * Kept as a method (rather than deleted) so none of those call
-     * sites need to change.
+     * Whether a proposed Start/End Time falls entirely within
+     * [Class Start Time, Class End Time] AND does NOT overlap the
+     * fixed Lunch Break window. This is the rule Auto Schedule/
+     * Regenerate and every "Recommend Day & Time" suggestion are
+     * built on — RecommendationService uses this (and
+     * overlapsLunchBreak() directly) to keep the automated engine
+     * from ever proposing a lunch-hour slot. It is a SOFT rule only:
+     * ScheduleConflictService::validate() uses isWithinClassHours()
+     * above instead, specifically so this method's Lunch Break
+     * portion never blocks a manual save.
+     */
+    public function isWithinSchedulingPolicy(string $startTime, string $endTime): bool
+    {
+        return $this->isWithinClassHours($startTime, $endTime)
+            && ! self::overlapsLunchBreak($startTime, $endTime);
+    }
+
+    /**
+     * Whether a Start/End Time window overlaps the fixed Lunch Break
+     * (12:00 PM - 1:00 PM). Used by RecommendationService to exclude
+     * lunch-hour candidates from Auto Schedule/Regenerate and every
+     * "Recommend Day & Time" suggestion (a SOFT exclusion from the
+     * automated engine's own output), and by RoomUtilizationService
+     * for accurate utilization accounting. Deliberately NOT called by
+     * ScheduleConflictService::validate() — see isWithinClassHours()
+     * above — so a Registrar/Dean/OIC can still manually place a
+     * class across lunch when they genuinely need to; it is never a
+     * hard save-time block.
      */
     public static function overlapsLunchBreak(string $startTime, string $endTime): bool
     {
-        return false;
+        $start = self::minutesFromTime($startTime);
+        $end = self::minutesFromTime($endTime);
+        $lunchStart = self::minutesFromTime(self::LUNCH_BREAK_START);
+        $lunchEnd = self::minutesFromTime(self::LUNCH_BREAK_END);
+
+        return $start < $lunchEnd && $end > $lunchStart;
     }
+
 
     private function formatTime(?string $value): ?string
     {

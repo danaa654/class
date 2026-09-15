@@ -6,6 +6,7 @@ use App\Models\FacultyLoadRequest;
 use App\Models\SchoolYear;
 use App\Services\PasswordPolicyService;
 use App\Services\SettingsService;
+use App\Support\AccessScope;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -66,6 +67,17 @@ class SettingsController extends Controller
         // no data at all — this closes that gap rather than changing
         // any write/action permission.
         $canViewAuditData = $isAdministrator || $role === 'Registrar';
+
+        // Activity Log specifically (not the rest of $canViewAuditData's
+        // System/Active-Sessions info) is also opened to Dean/OIC/
+        // Assistant Dean, but scoped to their own College — see
+        // ActivityLogController::activityLog()'s $scopeCollegeId param
+        // and AccessScope::collegeId(). Admin/Registrar keep the
+        // unrestricted, institution-wide log.
+        $canViewActivityLog = $canViewAuditData
+            || AccessScope::isCollegeScoped($user)
+            || AccessScope::isAssistantDean($user);
+
         $activeSchoolYear = SchoolYear::active();
 
         // Every role can see General + the read-only Academic Calendar
@@ -78,8 +90,13 @@ class SettingsController extends Controller
         $visibleGroups = match (true) {
             $isAdministrator, $role === 'Registrar' => [
                 'general', 'academic', 'workload', 'rooms',
-                'autoschedule', 'irregular', 'notifications', 'system',
+                'autoschedule', 'irregular', 'notifications',
+                'activityLog', 'system',
             ],
+            // Dean/OIC/Assistant Dean don't get 'system' (Active
+            // Sessions + app/DB info stays Admin/Registrar-only), but
+            // do get their own College-scoped 'activityLog' tab.
+            $canViewActivityLog => ['general', 'academic', 'notifications', 'activityLog'],
             default => ['general', 'academic', 'notifications'],
         };
 
@@ -123,8 +140,25 @@ class SettingsController extends Controller
             // pagination. (Inertia::optional() is this app's
             // inertiajs/inertia-laravel v3.2 name for what older
             // versions called Inertia::lazy() — same behavior.)
-            'activityLog' => $canViewAuditData
-                ? Inertia::optional(fn () => ActivityLogController::activityLog($request))
+            'activityLog' => $canViewActivityLog
+                ? Inertia::optional(fn () => ActivityLogController::activityLog(
+                    $request,
+                    // Admin/Registrar: null = unrestricted (unchanged).
+                    // Dean/OIC: their own college_id (AccessScope::
+                    // collegeId() already returns an impossible id if
+                    // they have no College assigned, per its own
+                    // "never treat as unrestricted" contract).
+                    // Assistant Dean: not College-scoped at all, so
+                    // collegeId() returns null here too — but Activity
+                    // Log has no per-entry category (GenEd/Minor vs
+                    // Major) to filter on the way Sections/Faculty do,
+                    // so rather than either "see everything" or "see
+                    // nothing", Assistant Dean gets $sharedOnly: only
+                    // entries whose subject has no College at all
+                    // (i.e. institution-wide GenEd resources).
+                    AccessScope::collegeId($user),
+                    sharedOnly: AccessScope::isAssistantDean($user) && ! AccessScope::isCollegeScoped($user),
+                ))
                 : [],
         ]);
     }

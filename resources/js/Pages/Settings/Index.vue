@@ -273,7 +273,7 @@ const onUpdateAccount = () => {
                     <Tab v-if="has('academic')" value="academic">Academic</Tab>
                     <Tab v-if="has('workload')" value="workload">Faculty &amp; Workload</Tab>
                     <Tab v-if="has('system') && isAdministrator" value="activeSessions">Active Sessions</Tab>
-                    <Tab v-if="has('system')" value="activityLog">Activity Log</Tab>
+                    <Tab v-if="has('activityLog')" value="activityLog">Activity Log</Tab>
                     <Tab v-if="has('system')" value="system">System</Tab>
                     <Tab v-if="!isAdministrator" value="account">Manage Account</Tab>
                 </TabList>
@@ -466,7 +466,7 @@ const onUpdateAccount = () => {
                     </TabPanel>
 
                     <!-- ============================== ACTIVITY LOG ============================== -->
-                    <TabPanel v-if="has('system')" value="activityLog">
+                    <TabPanel v-if="has('activityLog')" value="activityLog">
                         <div class="neu-card rounded-2xl p-6 transition-colors duration-300">
                         <Card class="!rounded-2xl !bg-transparent !border-0 !shadow-none" :pt="{ body: { class: '!bg-transparent !p-0' } }">
                             <template #content>
@@ -475,7 +475,8 @@ const onUpdateAccount = () => {
                                         <h2 class="text-lg font-bold text-[#1E293B] mb-1">Activity Log</h2>
                                         <p class="text-sm text-slate-500 max-w-2xl">
                                             A record of important actions across Classly — who did what, and when.
-                                            Visible to Administrators and Registrars only.
+                                            Administrators and Registrars see every College; Dean, OIC, and
+                                            Assistant Dean see only entries for their own College.
                                         </p>
                                     </div>
                                     <Button icon="pi pi-refresh" label="Refresh" text @click="reloadActivityLog()" />

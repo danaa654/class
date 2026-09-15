@@ -24,8 +24,13 @@
  * without being able to test it live. Click-to-assign (select an
  * unscheduled subject, then click an open Day/Time cell) reaches the
  * same outcome — set a row's Days/Start/End from this grid — without
- * that risk. It can be upgraded to real drag-and-drop later once this
- * interaction model is confirmed to be what's wanted.
+ * that risk. Click-to-assign is intentionally kept as the ONLY
+ * interaction here, even after Room Grid's native drag-and-drop was
+ * briefly ported over — it reproducibly wedged the browser's
+ * renderer into a stuck native-drag state (unrecoverable even via
+ * Escape, only a full page reload cleared it) on at least one
+ * environment. Until that's understood well enough to fix at the
+ * root, this grid stays drag-free.
  *
  * WHAT THIS GRID DOES NOT CATCH — it only visualizes and edits THIS
  * section's own Days/Time. Faculty double-booking across this
@@ -143,41 +148,9 @@ const blockFor = (row) => {
 };
 
 const selectedRow = ref(null);
-const dragOverCell = ref(null);
 
 const selectForAssignment = (row) => {
     selectedRow.value = selectedRow.value?.id === row.id ? null : row;
-};
-
-const onDragStart = (event, row) => {
-    // Dragging a sidebar chip also selects it, so the same helper
-    // text/highlight the click-to-assign flow shows stays accurate
-    // whichever way the Registrar chooses to place it.
-    selectedRow.value = row;
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', String(row.id));
-};
-
-const onDragEnterCell = (day, slotStart) => {
-    dragOverCell.value = `${day}-${slotStart}`;
-};
-
-const onDragLeaveCell = (day, slotStart) => {
-    if (dragOverCell.value === `${day}-${slotStart}`) {
-        dragOverCell.value = null;
-    }
-};
-
-const onDropCell = (event, day, slotStart) => {
-    dragOverCell.value = null;
-    const droppedId = Number(event.dataTransfer.getData('text/plain'));
-    // A drop always wins over whatever was merely click-selected —
-    // use the row actually dragged, falling back to the selected row
-    // in the unlikely case dataTransfer came back empty.
-    const row = props.rows.find((r) => r.id === droppedId) || selectedRow.value;
-    if (!row) return;
-    selectedRow.value = row;
-    assignCell(day, slotStart);
 };
 
 // The row's own required hours — split_hours for a split component,
@@ -424,7 +397,9 @@ const removeFromGrid = async (row) => {
 </script>
 
 <template>
-    <div class="flex flex-col lg:flex-row gap-4">
+    <div
+        class="flex flex-col lg:flex-row gap-4"
+    >
         <!-- LEFT SIDEBAR: Unscheduled subjects — same neu-inset card
              shape, legend-dot convention, and list-item styling as
              Room Grid's sidebars, so the two tabs read as one system. -->
@@ -449,10 +424,8 @@ const removeFromGrid = async (row) => {
                         : (isDark ? 'border-l-4 border-l-sky-400 bg-sky-500/10 border-transparent text-slate-200' : 'border-l-4 border-l-sky-400 bg-sky-50/40 border-transparent text-slate-700')"
                 >
                     <div
-                        draggable="true"
-                        class="px-2 py-1.5 cursor-grab active:cursor-grabbing hover:bg-black/5"
+                        class="px-2 py-1.5 hover:bg-black/5"
                         @click="selectForAssignment(row)"
-                        @dragstart="onDragStart($event, row)"
                     >
                         <div class="font-medium truncate flex items-center gap-1.5">
                             <span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 bg-sky-400"></span>
@@ -524,8 +497,7 @@ const removeFromGrid = async (row) => {
                 </li>
             </ul>
             <p v-if="selectedRow" class="text-[11px] mt-2.5" :class="isDark ? 'text-blue-400' : 'text-blue-500'">
-                Drag <strong>{{ selectedRow.subject?.subject_code }}</strong> onto an open slot, or just click one, to place it.
-                Drop/click another day at the same start time to add it to the same meeting pattern (e.g. MW).
+                Click an open slot to place <strong>{{ selectedRow.subject?.subject_code }}</strong>. Click another day at the same start time to add it to the same meeting pattern (e.g. MW).
             </p>
         </div>
 
@@ -594,16 +566,10 @@ const removeFromGrid = async (row) => {
                             class="border-r border-b cursor-pointer transition-colors"
                             :class="[
                                 isDark ? 'border-white/10' : 'border-slate-300',
-                                dragOverCell === `${day}-${slot}`
-                                    ? (isDark ? 'bg-blue-500/20' : 'bg-blue-100')
-                                    : (isDark ? 'hover:bg-white/5' : 'hover:bg-blue-50'),
+                                isDark ? 'hover:bg-white/5' : 'hover:bg-blue-50',
                             ]"
                             :style="{ gridRow: slotIndex + 2, gridColumn: dayIndex + 2 }"
                             @click="assignCell(day, slot)"
-                            @dragover.prevent
-                            @dragenter.prevent="onDragEnterCell(day, slot)"
-                            @dragleave="onDragLeaveCell(day, slot)"
-                            @drop.prevent="onDropCell($event, day, slot)"
                         ></div>
                     </template>
 
@@ -658,7 +624,7 @@ const removeFromGrid = async (row) => {
                 </div>
             </div>
             <p class="text-[11px] text-slate-400 mt-2">
-                Drag a subject from "Unscheduled" onto a slot to place it, or drag an existing block to move it. Click an open cell to schedule the selected subject, or click a placed block's ✕ to remove it.
+                Click a subject in "Unscheduled" to select it, then click an open cell to place it. Click a placed block's ✕ to remove it.
             </p>
         </div>
     </div>

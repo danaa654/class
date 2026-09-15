@@ -1161,6 +1161,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             maxlength="20"
                             autocomplete="off"
+                            placeholder="e.g. CCS"
                             :invalid="!!collegeForm.errors.code"
                         />
                         <label for="collegeCode">College Code *</label>
@@ -1193,6 +1194,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             maxlength="255"
                             autocomplete="off"
+                            placeholder="e.g. College of Computer Studies"
                             :invalid="!!collegeForm.errors.name"
                         />
                         <label for="collegeName">College Name *</label>
@@ -1209,6 +1211,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             maxlength="100"
                             autocomplete="off"
+                            placeholder="e.g. CCS"
                             :invalid="!!collegeForm.errors.short_name"
                         />
                         <label for="collegeShortName">Short Name</label>
@@ -1224,6 +1227,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             rows="3"
                             autoResize
+                            placeholder="e.g. Handles Information Technology and Computer Science programs"
                             :invalid="!!collegeForm.errors.description"
                         />
                         <label for="collegeDescription">Description</label>
@@ -1300,6 +1304,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             maxlength="20"
                             autocomplete="off"
+                            placeholder="e.g. CCS-BSIT"
                             :invalid="!!departmentForm.errors.code"
                         />
                         <label for="departmentCode">Department Code *</label>
@@ -1332,6 +1337,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             maxlength="255"
                             autocomplete="off"
+                            placeholder="e.g. BSIT"
                             :invalid="!!departmentForm.errors.name"
                         />
                         <label for="departmentName">Department Name *</label>
@@ -1348,6 +1354,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             maxlength="100"
                             autocomplete="off"
+                            placeholder="e.g. BSIT"
                             :invalid="!!departmentForm.errors.short_name"
                         />
                         <label for="departmentShortName">Short Name</label>
@@ -1363,6 +1370,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             rows="3"
                             autoResize
+                            placeholder="e.g. Bachelor of Science in Information Technology"
                             :invalid="!!departmentForm.errors.description"
                         />
                         <label for="departmentDescription">Description</label>
@@ -1438,6 +1446,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             maxlength="20"
                             autocomplete="off"
+                            placeholder="e.g. IT"
                             :invalid="!!majorForm.errors.code"
                         />
                         <label for="majorCode">Major Code *</label>
@@ -1470,6 +1479,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             maxlength="255"
                             autocomplete="off"
+                            placeholder="e.g. Bachelor of Science in Information Technology"
                             :invalid="!!majorForm.errors.name"
                         />
                         <label for="majorName">Major Name *</label>
@@ -1486,6 +1496,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             maxlength="100"
                             autocomplete="off"
+                            placeholder="e.g. BSIT"
                             :invalid="!!majorForm.errors.short_name"
                         />
                         <label for="majorShortName">Short Name</label>
@@ -1517,6 +1528,7 @@ const onForceDeleteMajor = (major) => {
                             class="w-full"
                             rows="3"
                             autoResize
+                            placeholder="e.g. 4-year IT program under the College of Computer Studies"
                             :invalid="!!majorForm.errors.description"
                         />
                         <label for="majorDescription">Description</label>

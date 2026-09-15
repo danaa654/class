@@ -1142,19 +1142,22 @@ class RecommendationService
      * from the spec.
      */
     /**
-     * BUG FIX — display label for a Room. `room_code` and `room_name`
-     * are sometimes set to the exact same value (e.g. "Room 304 (ICT
-     * Workshop)" in both columns), and unconditionally concatenating
-     * "{$code} — {$name}" then shows that value twice, joined by a
-     * dash. Falls back to just the code when the two are identical —
-     * mirrors the same guard RoomRecommendationController already
-     * uses for its own room-name display.
+     * BUG FIX — display label for a Room. Previously concatenated
+     * "{$code} — {$name}" (with a guard for when the two matched), but
+     * every OTHER room dropdown in the app (Section Subjects' Room
+     * select, the Rooms Master list, etc.) shows only `room_name` —
+     * `room_code` is an internal, often auto-generated slug (e.g. a
+     * CSV import can derive "ROOM306LAB1" from a name like "Room 306
+     * (Lab 1)") that a Registrar never otherwise sees. Concatenating
+     * it here made a Recommended room look like a completely
+     * different room from the exact same one appearing lower in the
+     * same dropdown's "Laboratory Rooms"/"Other Rooms" groups. Always
+     * using `room_name` alone keeps every room label in the app
+     * consistent, regardless of what its underlying code happens to be.
      */
     private function roomDisplayName(Room $room): string
     {
-        return $room->room_code === $room->room_name
-            ? $room->room_code
-            : "{$room->room_code} — {$room->room_name}";
+        return $room->room_name;
     }
 
     private function roomExplanation(string $roomLabel, bool $isTopPick, string $tier, float $utilizationPercent, int $score): string
@@ -2072,10 +2075,14 @@ class RecommendationService
 
                 $end = sprintf('%02d:%02d', intdiv($endMinutes, 60), $endMinutes % 60);
 
-                // LUNCH BREAK (12:00 PM - 1:00 PM) — hardcoded,
-                // non-editable, and enforced above every other check.
-                // A slot that overlaps it in any way is never a
-                // candidate, full stop.
+                // LUNCH BREAK (12:00 PM - 1:00 PM) — excluded from
+                // every Auto Generate/Regenerate and Recommend Day &
+                // Time candidate; the automated engine never proposes
+                // a slot overlapping it. This is a SOFT exclusion
+                // scoped to this recommendation engine only — it does
+                // not stop a Registrar/Dean/OIC from manually placing
+                // a class across lunch (ScheduleConflictService::
+                // validate() deliberately doesn't check this).
                 if (SchoolYear::overlapsLunchBreak($start, $end)) {
                     continue;
                 }

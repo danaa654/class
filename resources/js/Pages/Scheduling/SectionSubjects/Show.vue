@@ -3383,7 +3383,10 @@ const undoSplit = (row) => {
 const onRemove = (row) => {
     Swal.fire({
         title: 'Remove this subject?',
-        text: `${row.subject?.subject_code} will be removed from ${props.section.section_code}. The subject itself will not be deleted.`,
+        html: `${row.subject?.subject_code} (EDP Code: <strong>${row.edp_code ?? 'none yet'}</strong>) will be removed from ${props.section.section_code}. The subject itself will not be deleted.`
+            + (row.edp_code
+                ? `<br><br><span style="color:#B45309;">Note: EDP Code <strong>${row.edp_code}</strong> will not be reused — it stays retired even after this subject is removed.</span>`
+                : ''),
         icon: 'warning',
         showCancelButton: true,
         confirmButtonColor: '#DC2626',

@@ -201,7 +201,7 @@ class SectionController extends Controller
                 }
             })
             ->orderBy('name')
-            ->get(['id', 'name', 'code', 'department_id']);
+            ->get(['id', 'name', 'code', 'short_name', 'department_id']);
 
         // Curriculum dropdown data — the frontend filters this list down
         // to the curriculums belonging to the selected Major.
@@ -530,23 +530,26 @@ class SectionController extends Controller
 
         $data = $request->validated();
 
-        // KEEP CODE/NAME IN SYNC FOR IRREGULAR SECTIONS — an Irregular
-        // section is a single scheduling group with one name, never a
-        // set of A/B/C blocks (see SectionBatchGeneratorService's
-        // nextIrregularName() docblock), and both storeBatch() and
-        // store() already set section_code === section_name for it at
-        // creation time. The Edit dialog, however, exposes Section
-        // Code and Section Name as two independently-editable fields,
-        // so an edit that only touches one of them (e.g. renaming the
-        // code to disambiguate it from another Irregular group) used
-        // to silently leave the other stale — producing a header like
-        // "BSIT-4A-IRREG — BSIT-4-IRREG" that looks like two different
-        // sections got merged together. Enforcing the same "one name"
-        // rule here, server-side, means it can never drift again
-        // regardless of what the frontend sends.
-        if (($data['section_type'] ?? $section->section_type) === 'Irregular') {
-            $data['section_name'] = $data['section_code'];
-        }
+        // KEEP CODE/NAME IN SYNC — a Section (Regular or Irregular) has
+        // exactly one name in the eyes of the rest of the app; the Edit
+        // dialog only ever exposes a single "Section Name" field, which
+        // is actually bound to section_code — there's no separate input
+        // anywhere for section_name. Left alone, an edit that changes
+        // the code (e.g. "IT-4A" -> "BSIT-4A") silently leaves
+        // section_name stale at its old value, producing a header like
+        // "BSIT-4A — IT-4A" that looks like two different sections got
+        // merged together, and a Sections list ("Section Name" column,
+        // which reads section_name) that appears not to have saved the
+        // edit at all. Previously this sync only ran for Irregular
+        // sections; broadened here since Regular sections are edited
+        // through the exact same single-field dialog and drift the
+        // same way. See SectionBatchGeneratorService's
+        // nextIrregularName() docblock for why Irregular sections in
+        // particular can never be a set of A/B/C blocks — both
+        // storeBatch() and store() already set section_code ===
+        // section_name for every Section at creation time regardless
+        // of type, so this just keeps that invariant true on update too.
+        $data['section_name'] = $data['section_code'];
 
         try {
             $section->update($data);
@@ -940,7 +943,17 @@ class SectionController extends Controller
             $sectionSubject->setRelation('section', $section->loadMissing('major'));
             $edpCodeService->generateForSectionSubject($sectionSubject);
 
-            $notifications->subjectAdded($section, $sectionSubject, $request->user());
+            // A single Subject gets its own notification (names it
+            // specifically); several at once are summarized into one
+            // "N subjects added" notification instead of one per
+            // Subject — see subjectsAddedBatch()'s docblock.
+            if ($subjectIds->count() === 1) {
+                $notifications->subjectAdded($section, $sectionSubject, $request->user());
+            }
+        }
+
+        if ($subjectIds->count() > 1) {
+            $notifications->subjectsAddedBatch($section, $subjectIds->count(), $request->user());
         }
 
         $conflictService->bumpScheduleVersion($lockedSection);

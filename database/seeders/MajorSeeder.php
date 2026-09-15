@@ -27,49 +27,49 @@ class MajorSeeder extends Seeder
      */
     public const MAJORS = [
         'CCS-BSIT' => [
-            'code' => 'BSIT',
+            'code' => 'IT',
             'name' => 'Bachelor of Science in Information Technology',
             'short_name' => 'BSIT',
             'years' => 4,
         ],
         'CTE-BSED' => [
-            'code' => 'BSED',
+            'code' => 'ED',
             'name' => 'Bachelor of Secondary Education major in English',
             'short_name' => 'BSED',
             'years' => 4,
         ],
         'SHTM-BSHM' => [
-            'code' => 'BSHM',
+            'code' => 'HM',
             'name' => 'Bachelor of Science in Hospitality Management',
             'short_name' => 'BSHM',
             'years' => 4,
         ],
         'SHTM-BSTM' => [
-            'code' => 'BSTM',
+            'code' => 'TM',
             'name' => 'Bachelor of Science in Tourism Management',
             'short_name' => 'BSTM',
             'years' => 4,
         ],
         'COC-BSCRIMQD' => [
-            'code' => 'BSCRIMQD',
+            'code' => 'QD',
             'name' => 'Bachelor of Science in Criminology major in Questioned Documents Examination',
             'short_name' => 'BSCRIM-QD',
             'years' => 4,
         ],
         'COC-BSCRIMFI' => [
-            'code' => 'BSCRIMFI',
+            'code' => 'FI',
             'name' => 'Bachelor of Science in Criminology major in Fingerprint Identification',
             'short_name' => 'BSCRIM-FI',
             'years' => 4,
         ],
         'COC-BSCRIMFB' => [
-            'code' => 'BSCRIMFB',
+            'code' => 'FB',
             'name' => 'Bachelor of Science in Criminology major in Firearms Identification (Forensic Ballistics)',
             'short_name' => 'BSCRIM-FB',
             'years' => 4,
         ],
         'COC-BSCRIMLD' => [
-            'code' => 'BSCRIMLD',
+            'code' => 'LD',
             'name' => 'Bachelor of Science in Criminology major in Lie Detection',
             'short_name' => 'BSCRIM-LD',
             'years' => 4,

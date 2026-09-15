@@ -122,14 +122,18 @@ class RoomRecommendationController extends Controller
             ->where('active', true)
             ->where('room_id', '!=', $room->id)
             ->whereIn('subject_id', $subjects->pluck('id'))
-            ->with('room:id,room_code,room_name')
+            ->with('room:id,room_name')
             ->get(['id', 'room_id', 'subject_id'])
             ->groupBy('subject_id')
             ->map(fn ($rows) => $rows->map(fn ($row) => [
                 'room_id' => $row->room->id,
-                'room_name' => $row->room->room_code === $row->room->room_name
-                    ? $row->room->room_code
-                    : "{$row->room->room_code} ({$row->room->room_name})",
+                // Room Name only — see RecommendationService::roomDisplayName()
+                // for why concatenating room_code alongside room_name is
+                // avoided: an auto-generated/imported room_code (e.g.
+                // "ROOM306LAB1") that differs from its readable room_name
+                // ("Room 306 (Lab 1)") made the same room look like two
+                // different rooms depending on where its label was built.
+                'room_name' => $row->room->room_name,
             ])->values());
 
         $mapped = $subjects->map(function (Subject $subject) use ($room, $roomWantsLaboratory, $otherRoomsBySubject) {

@@ -544,7 +544,7 @@ const suggestedPrefix = computed(() => {
         return '';
     }
 
-    const base = `${major.code}-${ordinal}`;
+    const base = `${major.short_name || major.code}-${ordinal}`;
 
     // Irregular sections are a single named group (e.g. "BSIT-4-IRREG"),
     // not a letter-suffixed block — see nextIrregularName()'s docblock
@@ -884,9 +884,25 @@ const combinedSelectedSubjectIds = computed(() => {
     return combined;
 });
 
-// Detect duplicate names the admin typed in manually within the
-// preview list itself (server also re-checks this, and against the
-// database, on save).
+// Overview panel data (Prompt: "overview when the user clicks Create
+// Section") — the exact subjects about to be placed, resolved from
+// whichever tab(s) they came from (curriculum checklist and/or manual
+// search), since combinedSelectedSubjectIds only holds ids. EDP Codes
+// are never guessed here — they're minted server-side the moment each
+// SectionSubject row is actually created (see EDPCodeService), so this
+// only shows what's known for certain before that happens.
+const combinedSelectedSubjectsPreview = computed(() => {
+    const bySubjectId = new Map();
+    subjectOptions.value.forEach((subject) => bySubjectId.set(subject.id, subject));
+    manualSubjectOptions.value.forEach((subject) => bySubjectId.set(subject.id, subject));
+
+    return Array.from(combinedSelectedSubjectIds.value)
+        .map((id) => bySubjectId.get(id))
+        .filter(Boolean)
+        .sort((a, b) => (a.subject_code || '').localeCompare(b.subject_code || ''));
+});
+
+
 const previewDuplicates = computed(() => {
     const seen = new Map();
     previewSections.value.forEach((row, index) => {
@@ -2053,6 +2069,39 @@ const onUnlockSection = (section) => {
                             placed — two blocks of BSIT-1 (e.g. 1A and 1B) end up sharing the exact same subject list
                             instead of needing "Generate Curriculum Subjects" or Manual Selection run separately for
                             each. You can still add, remove, or override subjects per section afterward.
+                        </p>
+                    </div>
+
+                    <!-- Subjects & EDP Codes Overview — lets the admin verify the
+                         exact subject list about to be placed before clicking
+                         Create Section(s). EDP Codes are minted the moment each
+                         subject is actually placed (server-side, see
+                         EDPCodeService), so the exact code can't be predicted
+                         here — this only confirms WHICH subjects will get one,
+                         plus the standing rule about what happens if one is
+                         later removed. -->
+                    <div v-if="combinedSelectedSubjectsPreview.length" class="rounded-xl border border-slate-200 overflow-hidden mt-3">
+                        <div class="bg-slate-50 px-4 py-2 border-b border-slate-200">
+                            <span class="text-sm font-semibold text-slate-700">
+                                Subjects & EDP Codes Overview ({{ combinedSelectedSubjectsPreview.length }})
+                            </span>
+                        </div>
+                        <div class="max-h-40 overflow-y-auto divide-y divide-slate-100">
+                            <div
+                                v-for="subject in combinedSelectedSubjectsPreview"
+                                :key="subject.id"
+                                class="flex items-center justify-between px-4 py-1.5 text-sm"
+                            >
+                                <span>
+                                    <span class="font-medium text-slate-700">{{ subject.subject_code }}</span>
+                                    <span class="text-slate-500"> — {{ subject.subject_title }}</span>
+                                </span>
+                                <span class="text-xs text-slate-400 italic">EDP Code assigned on creation</span>
+                            </div>
+                        </div>
+                        <p class="text-xs px-4 py-2 border-t border-slate-100" style="color:#B45309; background-color:#FFFBEB;">
+                            Once a subject is placed, its EDP Code is permanent — if it's later removed from a
+                            section, that EDP Code will not be reused for a different subject.
                         </p>
                     </div>
                 </div>

@@ -35,42 +35,42 @@ class CurriculumSeeder extends Seeder
     {
         $curricula = [
             [
-                'major_code' => 'BSIT',
+                'major_code' => 'IT',
                 'code' => 'BSIT-2023-2027',
                 'name' => 'BS Information Technology Curriculum',
             ],
             [
-                'major_code' => 'BSED',
+                'major_code' => 'ED',
                 'code' => 'BSED-ENG-2023-2027',
                 'name' => 'BSED English Curriculum',
             ],
             [
-                'major_code' => 'BSCRIMQD',
+                'major_code' => 'QD',
                 'code' => 'BSCRIM-QD-2023-2027',
                 'name' => 'BS Criminology (Questioned Documents Examination) Curriculum',
             ],
             [
-                'major_code' => 'BSCRIMFI',
+                'major_code' => 'FI',
                 'code' => 'BSCRIM-FI-2023-2027',
                 'name' => 'BS Criminology (Fingerprint Identification) Curriculum',
             ],
             [
-                'major_code' => 'BSCRIMFB',
+                'major_code' => 'FB',
                 'code' => 'BSCRIM-FB-2023-2027',
                 'name' => 'BS Criminology (Firearms Identification) Curriculum',
             ],
             [
-                'major_code' => 'BSCRIMLD',
+                'major_code' => 'LD',
                 'code' => 'BSCRIM-LD-2023-2027',
                 'name' => 'BS Criminology (Lie Detection) Curriculum',
             ],
             [
-                'major_code' => 'BSHM',
+                'major_code' => 'HM',
                 'code' => 'BSHM-2023-2027',
                 'name' => 'BS Hospitality Management Curriculum',
             ],
             [
-                'major_code' => 'BSTM',
+                'major_code' => 'TM',
                 'code' => 'BSTM-2023-2027',
                 'name' => 'BS Tourism Management Curriculum',
             ],

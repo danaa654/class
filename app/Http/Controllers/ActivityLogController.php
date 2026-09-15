@@ -3,18 +3,27 @@
 namespace App\Http\Controllers;
 
 use App\Models\ActivityLog;
+use App\Models\Faculty;
+use App\Models\Section;
+use App\Models\Subject;
 use App\Models\User;
 use App\Services\ActivityLogService;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 
 /**
- * ACTIVITY LOG — "who did what, when" tab on the Settings page,
- * visible to Administrator and Registrar (see
- * SettingsController::index()'s $canViewAuditData) — same pattern as
- * ActiveSessionController's builder, but Active Sessions itself stays
- * Administrator-only since that's a stricter "who's online right
- * now" concern rather than an audit-trail one.
+ * ACTIVITY LOG — "who did what, when" tab on the Settings page.
+ * Administrator and Registrar see the unrestricted, institution-wide
+ * log. Dean/OIC/Assistant Dean also get a read-only view (see
+ * SettingsController::index()'s $canViewActivityLog), but scoped to
+ * their own College via $scopeCollegeId/$sharedOnly below — same
+ * ROLE + SCOPE model as App\Support\AccessScope uses elsewhere
+ * (Sections, Faculty qualifications, etc.), just applied here per
+ * log entry's polymorphic subject instead of a direct column, since
+ * ActivityLog itself doesn't store college_id.
+ * Same pattern as ActiveSessionController's builder, but Active
+ * Sessions itself stays Administrator-only since that's a stricter
+ * "who's online right now" concern rather than an audit-trail one.
  * A plain static builder method called from SettingsController::index()
  * (wrapped in Inertia::lazy() so it's only queried when the tab is
  * actually opened or its filters change — see the
@@ -31,6 +40,17 @@ class ActivityLogController extends Controller
      * Build the paginated, filtered Activity Log payload consumed by
      * the Settings page's Activity Log tab.
      *
+     * @param  ?int  $scopeCollegeId  null = unrestricted (Admin/Registrar).
+     *      Otherwise restricts to entries whose subject (Faculty/
+     *      Subject/User/Section) resolves to this College. Entries
+     *      with no subject (e.g. Settings updates) or a subject type
+     *      that has no College at all (e.g. AcademicTerm) are excluded
+     *      once scoped — they aren't any one College's business.
+     * @param  bool  $sharedOnly  Assistant Dean only: ignore
+     *      $scopeCollegeId and instead show entries whose subject has
+     *      no College at all (institution-wide GenEd resources) —
+     *      Sections always belong to a College, so this never matches
+     *      Section entries.
      * @return array{
      *     data: list<array{id:int,actor:?string,role:?string,action:string,description:string,created_at:string}>,
      *     current_page:int, last_page:int, total:int,
@@ -39,9 +59,27 @@ class ActivityLogController extends Controller
      *     user_options: list<array{id:int,name:string}>,
      * }
      */
-    public static function activityLog(Request $request): array
+    public static function activityLog(Request $request, ?int $scopeCollegeId = null, bool $sharedOnly = false): array
     {
         $query = ActivityLog::query()->with('user')->latest('created_at');
+
+        if ($sharedOnly || $scopeCollegeId !== null) {
+            $query->where(function ($scoped) use ($scopeCollegeId, $sharedOnly) {
+                $scoped->whereHasMorph(
+                    'subject',
+                    [Faculty::class, Subject::class, User::class],
+                    fn ($q) => $sharedOnly ? $q->whereNull('college_id') : $q->where('college_id', $scopeCollegeId)
+                );
+
+                if (! $sharedOnly) {
+                    $scoped->orWhereHasMorph(
+                        'subject',
+                        [Section::class],
+                        fn ($q) => $q->whereHas('major.department', fn ($inner) => $inner->where('college_id', $scopeCollegeId))
+                    );
+                }
+            });
+        }
 
         $action = $request->string('log_action')->toString() ?: null;
         $userId = $request->integer('log_user_id') ?: null;
@@ -63,6 +101,13 @@ class ActivityLogController extends Controller
         if ($dateTo) {
             $query->whereDate('created_at', '<=', $dateTo);
         }
+
+        // Cloned BEFORE pagination/ordering is finalized so the user
+        // filter dropdown only offers users who actually have a
+        // (scope-visible) log entry — same $query, including the
+        // College scoping above, minus the action/date filters that
+        // don't belong in this pluck.
+        $scopedUserIds = (clone $query)->whereNotNull('user_id')->distinct()->pluck('user_id');
 
         /** @var LengthAwarePaginator $paginated */
         $paginated = $query->paginate(
@@ -92,7 +137,7 @@ class ActivityLogController extends Controller
             ],
             'action_options' => ActivityLogService::actions(),
             'user_options' => User::query()
-                ->whereIn('id', ActivityLog::query()->whereNotNull('user_id')->distinct()->pluck('user_id'))
+                ->whereIn('id', $scopedUserIds)
                 ->get(['id', 'name', 'first_name', 'middle_name', 'last_name', 'suffix'])
                 ->map(fn (User $u) => ['id' => $u->id, 'name' => $u->full_name])
                 ->values()

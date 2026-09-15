@@ -3636,6 +3636,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 'component' => 'laboratory',
                 'delivery_mode' => 'face_to_face',
                 'split_hours' => $validated['f2f_hours'],
+                'hours_confirmed' => $validated['hours_confirmed'] ?? false,
             ]);
 
             // SHARED EDP CODE — same reasoning as the primary section's
@@ -3658,6 +3659,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 'capacity' => $siblingRow->capacity,
                 'status' => 'Draft',
                 'edp_code' => $siblingRow->edp_code,
+                'hours_confirmed' => $validated['hours_confirmed'] ?? false,
             ]);
 
             $siblingOnlineRow->setRelation('section', $siblingRow->section);

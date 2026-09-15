@@ -207,10 +207,18 @@ class ScheduleConflictService
 
         $activeSchoolYear = SchoolYear::active();
 
-        // 6. Lunch break restriction (fixed, non-editable window).
-        if (SchoolYear::overlapsLunchBreak($startTime, $endTime)) {
-            return ['days' => 'This time slot overlaps the Lunch Break (12:00 PM - 1:00 PM).'];
-        }
+        // Lunch break (12:00 PM - 1:00 PM) is intentionally NOT a hard
+        // block here. Auto Generate/Regenerate and every "Recommend
+        // Day & Time" suggestion already avoid it on their own —
+        // RecommendationService::recommendTimes()/buildTimeCandidate()
+        // filter out any candidate overlapping SchoolYear::
+        // overlapsLunchBreak() before it's ever scored or offered, so
+        // the automated engine never proposes lunch-hour slots in the
+        // first place. Rejecting it again here would additionally
+        // stop a Registrar/Dean from MANUALLY placing a class across
+        // lunch when they genuinely need to (e.g. a make-up session,
+        // a short elective, exam-week scheduling) — which is exactly
+        // the "don't lock it" behavior this was changed to support.
 
         // 7. Academic calendar allowed days — every Day requested must
         // be one of the active School Year's configured Class Days.
@@ -223,7 +231,12 @@ class ScheduleConflictService
         }
 
         // 8. Time within allowed class hours (Class Start/End Time).
-        if ($activeSchoolYear && ! $activeSchoolYear->isWithinSchedulingPolicy($startTime, $endTime)) {
+        // Deliberately isWithinClassHours(), NOT isWithinSchedulingPolicy()
+        // — the latter also factors in the Lunch Break, which must
+        // stay a soft Auto Generate/Recommend-only exclusion (see
+        // SchoolYear::overlapsLunchBreak()'s docblock), never a hard
+        // block on a manual save here.
+        if ($activeSchoolYear && ! $activeSchoolYear->isWithinClassHours($startTime, $endTime)) {
             return ['days' => 'This time falls outside the allowed class hours ('
                 .SchoolYear::to12Hour($activeSchoolYear->classStartTime()).' - '.SchoolYear::to12Hour($activeSchoolYear->classEndTime()).').', ];
         }

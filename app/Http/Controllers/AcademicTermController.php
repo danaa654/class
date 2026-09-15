@@ -8,6 +8,7 @@ use App\Models\AcademicTerm;
 use App\Models\SchoolYear;
 use App\Models\Semester;
 use App\Services\ActivityLogService;
+use App\Services\NotificationService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -120,7 +121,7 @@ class AcademicTermController extends Controller
      * The single-Active-record rule for Academic Term is enforced in
      * the AcademicTerm model's `saved` hook, not here.
      */
-    public function store(StoreAcademicTermRequest $request): RedirectResponse
+    public function store(StoreAcademicTermRequest $request, NotificationService $notifications): RedirectResponse
     {
         $validated = $request->validated();
 
@@ -137,12 +138,18 @@ class AcademicTermController extends Controller
         $schoolYear = $this->resolveSchoolYear($validated);
         $semester = $this->resolveSemester($validated['semester']);
 
-        AcademicTerm::create([
+        $academicTerm = AcademicTerm::create([
             'school_year_id' => $schoolYear->id,
             'semester_id' => $semester->id,
             'status' => $validated['status'],
             'remarks' => $validated['remarks'] ?? null,
         ]);
+
+        // Notifies every College's Dean/OIC/Assistant Dean (plus
+        // Admin/Registrar) and records the Activity Log entry — see
+        // NotificationService::termCreated()'s docblock for why this
+        // is institution-wide rather than College-scoped.
+        $notifications->termCreated($academicTerm, $request->user());
 
         return redirect()->route('academic-calendar')->with('success', 'Academic term created successfully.');
     }
