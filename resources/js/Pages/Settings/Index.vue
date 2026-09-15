@@ -525,7 +525,9 @@ const onUpdateAccount = () => {
                                         <p class="text-sm text-slate-500 max-w-2xl">
                                             A record of important actions across Classly — who did what, and when.
                                             Administrators and Registrars see every College; Dean, OIC, and
-                                            Assistant Dean see only entries for their own College.
+                                            Assistant Dean see entries for their own College plus any
+                                            institution-wide/shared item (e.g. a GenEd subject or an
+                                            all-college room).
                                         </p>
                                     </div>
                                     <Button icon="pi pi-refresh" label="Refresh" text @click="reloadActivityLog()" />

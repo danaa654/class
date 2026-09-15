@@ -90,6 +90,18 @@ class ActivityLogService
 
     public const SUBJECT_DELETED = 'SUBJECT_DELETED';
 
+    // Room Master create/import/update/delete — same "master list"
+    // convention as the Subject Library above. See
+    // NotificationService::roomCreated()/roomsImported()/
+    // roomUpdated()/roomDeleted().
+    public const ROOM_CREATED = 'ROOM_CREATED';
+
+    public const ROOM_IMPORTED = 'ROOM_IMPORTED';
+
+    public const ROOM_UPDATED = 'ROOM_UPDATED';
+
+    public const ROOM_DELETED = 'ROOM_DELETED';
+
     public const SESSION_FORCE_LOGOUT = 'SESSION_FORCE_LOGOUT';
 
     public const PASSWORD_RESET_REQUESTED = 'PASSWORD_RESET_REQUESTED';
@@ -136,6 +148,10 @@ class ActivityLogService
             self::SUBJECT_IMPORTED,
             self::SUBJECT_UPDATED,
             self::SUBJECT_DELETED,
+            self::ROOM_CREATED,
+            self::ROOM_IMPORTED,
+            self::ROOM_UPDATED,
+            self::ROOM_DELETED,
             self::SESSION_FORCE_LOGOUT,
             self::PASSWORD_RESET_REQUESTED,
             self::PASSWORD_CHANGE_REQUIRED,

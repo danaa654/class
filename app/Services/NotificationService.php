@@ -9,6 +9,7 @@ use App\Models\ScheduleAuditLog;
 use App\Models\AcademicTerm;
 use App\Models\Section;
 use App\Models\Subject;
+use App\Models\Room;
 use App\Models\SectionSubject;
 use App\Models\FacultyLoadRequest;
 use App\Models\User;
@@ -91,6 +92,17 @@ class NotificationService
     public const TYPE_SUBJECT_UPDATED = 'SUBJECT_UPDATED_IN_LIBRARY';
 
     public const TYPE_SUBJECT_DELETED = 'SUBJECT_DELETED_FROM_LIBRARY';
+
+    // Room Master create/import/update/delete — same "master list"
+    // convention as the Subject Library types above. See
+    // roomCreated()/roomsImported()/roomUpdated()/roomDeleted().
+    public const TYPE_ROOM_CREATED = 'ROOM_CREATED';
+
+    public const TYPE_ROOMS_IMPORTED = 'ROOMS_IMPORTED';
+
+    public const TYPE_ROOM_UPDATED = 'ROOM_UPDATED';
+
+    public const TYPE_ROOM_DELETED = 'ROOM_DELETED';
 
     public const TYPE_AUTO_SCHEDULE_COMPLETED = 'AUTO_SCHEDULE_COMPLETED';
 
@@ -560,6 +572,236 @@ class NotificationService
         $ownCollegeDeanOic = $subject->college_id
             ? User::query()->role(AccessScope::COLLEGE_SCOPED_ROLES)->where('college_id', $subject->college_id)->get()
             : collect();
+
+        return $admins
+            ->concat($ownCollegeDeanOic)
+            ->unique('id')
+            ->reject(fn (User $u) => $u->is($actor))
+            ->values();
+    }
+
+    /**
+     * A new Room was added to the Room Master (RoomController::store()).
+     * Room administration is Admin/Registrar-only (see RoomPolicy), so
+     * the actor here is always one of those two — this notifies the
+     * OTHER one, plus whichever Dean/OIC/Assistant Dean can actually
+     * schedule into the room, via roomRecipients()'s scope rule.
+     */
+    public function roomCreated(Room $room, User $actor): void
+    {
+        $room->loadMissing('college');
+        $collegeLabel = $room->college?->name ?? 'all Colleges';
+
+        foreach ($this->roomRecipients($room, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_ROOM_CREATED,
+                priority: self::PRIORITY_INFO,
+                title: 'Room Added',
+                message: "{$room->room_code} — {$room->room_name} ({$collegeLabel}) was added to the Room Master by {$actor->full_name}.",
+                data: [
+                    'room_id' => $room->id,
+                    'room_code' => $room->room_code,
+                    'room_name' => $room->room_name,
+                    'college_id' => $room->college_id,
+                ],
+            );
+        }
+
+        $this->activityLog->record(
+            ActivityLogService::ROOM_CREATED,
+            "{$room->room_code} — {$room->room_name} was added to the Room Master by {$actor->full_name}.",
+            $room,
+            $actor,
+        );
+    }
+
+    /**
+     * A batch of Rooms was bulk-imported into the Room Master
+     * (RoomController::import()). One summary notification per
+     * affected recipient — same convention as subjectsImported() —
+     * covering the whole file, with recipients being the UNION of
+     * roomRecipients() across every Room actually created.
+     *
+     * @param  \Illuminate\Support\Collection<int, Room>|array<int, Room>  $created
+     */
+    public function roomsImported(iterable $created, User $actor): void
+    {
+        $created = collect($created);
+        $count = $created->count();
+
+        if ($count < 1) {
+            return;
+        }
+
+        $hasSharedRow = $created->contains(fn (Room $r) => $r->college_id === null);
+        $collegeIds = $created->pluck('college_id')->filter()->unique()->values();
+
+        $recipients = $created
+            ->flatMap(fn (Room $r) => $this->roomRecipients($r, $actor))
+            ->unique('id')
+            ->values();
+
+        $message = $count === 1
+            ? "1 room was imported into the Room Master by {$actor->full_name}."
+            : "{$count} rooms were imported into the Room Master by {$actor->full_name}.";
+
+        foreach ($recipients as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_ROOMS_IMPORTED,
+                priority: self::PRIORITY_INFO,
+                title: 'Rooms Imported',
+                message: $message,
+                data: [
+                    'room_count' => $count,
+                    'room_codes' => $created->pluck('room_code')->all(),
+                    'includes_unrestricted_room' => $hasSharedRow,
+                    'college_ids' => $collegeIds->all(),
+                ],
+            );
+        }
+
+        $this->activityLog->record(
+            ActivityLogService::ROOM_IMPORTED,
+            $message,
+            null,
+            $actor,
+        );
+    }
+
+    /**
+     * An existing Room's definition was edited directly
+     * (RoomController::update()). Only call when $changes is
+     * non-empty (caller's job to diff, same contract as
+     * subjectUpdated()/facultyUpdatedDirectly()).
+     *
+     * @param  list<array{field: string, old: mixed, new: mixed}>  $changes
+     */
+    public function roomUpdated(Room $room, User $actor, array $changes): void
+    {
+        if (empty($changes)) {
+            return;
+        }
+
+        $fieldLabels = [
+            'room_name' => 'Room Name',
+            'building' => 'Building',
+            'floor' => 'Floor',
+            'room_type' => 'Room Type',
+            'room_category' => 'Room Category',
+            'department_id' => 'Department',
+            'college_id' => 'College',
+            'capacity' => 'Capacity',
+            'status' => 'Status',
+        ];
+
+        $summary = collect($changes)
+            ->pluck('field')
+            ->map(fn (string $field) => $fieldLabels[$field] ?? Str::headline($field))
+            ->implode(', ');
+
+        $message = "{$room->room_code}'s {$summary} ".(count($changes) === 1 ? 'has' : 'have')." been updated by {$actor->full_name}.";
+
+        foreach ($this->roomRecipients($room, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_ROOM_UPDATED,
+                priority: self::PRIORITY_INFO,
+                title: 'Room Updated',
+                message: $message,
+                data: [
+                    'room_id' => $room->id,
+                    'room_code' => $room->room_code,
+                    'changes' => $changes,
+                ],
+            );
+        }
+
+        $this->activityLog->record(
+            ActivityLogService::ROOM_UPDATED,
+            $message,
+            $room,
+            $actor,
+        );
+    }
+
+    /**
+     * A Room was deleted from the Room Master (RoomController::
+     * destroy() — only reachable once it's confirmed no finalized
+     * assignment blocks it, see that method). Pass the Room BEFORE
+     * it's deleted so college_id is still available for scoping.
+     */
+    public function roomDeleted(Room $room, User $actor): void
+    {
+        $message = "{$room->room_code} — {$room->room_name} was removed from the Room Master by {$actor->full_name}.";
+
+        foreach ($this->roomRecipients($room, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_ROOM_DELETED,
+                priority: self::PRIORITY_WARNING,
+                title: 'Room Deleted',
+                message: $message,
+                data: [
+                    'room_id' => $room->id,
+                    'room_code' => $room->room_code,
+                    'room_name' => $room->room_name,
+                    'college_id' => $room->college_id,
+                ],
+            );
+        }
+
+        $this->activityLog->record(
+            ActivityLogService::ROOM_DELETED,
+            $message,
+            $room,
+            $actor,
+        );
+    }
+
+    /**
+     * SCOPE RULE for Room Master events (create/import/update/
+     * delete), per spec: the actor is always Admin/Registrar (Room
+     * administration is Admin/Registrar-only — see RoomPolicy), so
+     * this always notifies the OTHER of that pair, plus whichever
+     * Dean/OIC/Assistant Dean can actually schedule into this room —
+     * i.e. it mirrors Room::scopeUsableBy()'s own eligibility rule
+     * exactly, rather than inventing a separate one:
+     *
+     *   - College-restricted (college_id set, e.g. a CCS-only lab):
+     *     Admin + Registrar + that ONE College's own Dean/OIC — only
+     *     they can schedule into it, per scopeUsableBy().
+     *   - Unrestricted (college_id null — a general lecture room open
+     *     to every department): Admin + Registrar + EVERY College's
+     *     Dean/OIC + Assistant Dean, since scopeUsableBy() makes it
+     *     usable institution-wide.
+     *
+     * Actor always excluded, deduped by user id.
+     *
+     * @return Collection<int, User>
+     */
+    private function roomRecipients(Room $room, User $actor): Collection
+    {
+        $admins = $this->adminRecipients();
+
+        if ($room->college_id === null) {
+            $everyDeanOic = User::query()->role(AccessScope::COLLEGE_SCOPED_ROLES)->get();
+            $assistantDeans = User::query()->role(AccessScope::ASSISTANT_DEAN_ROLE)->get();
+
+            return $admins
+                ->concat($everyDeanOic)
+                ->concat($assistantDeans)
+                ->unique('id')
+                ->reject(fn (User $u) => $u->is($actor))
+                ->values();
+        }
+
+        $ownCollegeDeanOic = User::query()->role(AccessScope::COLLEGE_SCOPED_ROLES)->where('college_id', $room->college_id)->get();
 
         return $admins
             ->concat($ownCollegeDeanOic)

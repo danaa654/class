@@ -8,6 +8,7 @@ use App\Http\Requests\UpdateRoomRequest;
 use App\Models\College;
 use App\Models\Department;
 use App\Models\Room;
+use App\Services\NotificationService;
 use App\Services\RoomUtilizationService;
 use App\Support\RoomCategories;
 use Illuminate\Http\JsonResponse;
@@ -27,7 +28,10 @@ class RoomController extends Controller
     /** Roles that may see every Room regardless of College/Department scope. */
     private const UNSCOPED_ROLES = ['Administrator', 'Registrar'];
 
-    public function __construct(private readonly RoomUtilizationService $utilization) {}
+    public function __construct(
+        private readonly RoomUtilizationService $utilization,
+        private readonly NotificationService $notifications,
+    ) {}
 
     /**
      * Display the Rooms page — now the authoritative resource-management
@@ -187,7 +191,9 @@ class RoomController extends Controller
     {
         $this->authorize('create', Room::class);
 
-        Room::create($request->validated());
+        $room = Room::create($request->validated());
+
+        $this->notifications->roomCreated($room, $request->user());
 
         return redirect()->route('scheduling.rooms')->with('success', 'Room added successfully.');
     }
@@ -204,7 +210,27 @@ class RoomController extends Controller
     {
         $this->authorize('update', $room);
 
-        $room->update($request->validated());
+        $data = $request->validated();
+
+        // Fill (don't save yet) so getDirty() tells us exactly which
+        // columns actually changed value — same convention as
+        // SubjectController::update()/FacultyController::update().
+        $room->fill($data);
+        $changedFields = array_intersect(
+            array_keys($room->getDirty()),
+            ['room_name', 'building', 'floor', 'room_type', 'room_category', 'department_id', 'college_id', 'capacity', 'status'],
+        );
+        $changes = array_map(fn (string $field) => [
+            'field' => $field,
+            'old' => $room->getOriginal($field),
+            'new' => $room->{$field},
+        ], $changedFields);
+
+        $room->save();
+
+        if (! empty($changes)) {
+            $this->notifications->roomUpdated($room, $request->user(), $changes);
+        }
 
         return redirect()->route('scheduling.rooms')->with('success', 'Room updated successfully.');
     }
@@ -233,6 +259,11 @@ class RoomController extends Controller
             return back()->with('error', 'This room has active scheduled classes. Confirm the warning to proceed.')
                 ->with('roomDeletionImpact', $impact);
         }
+
+        // Notify/log BEFORE the delete — roomRecipients() and the
+        // activity log entry both need college_id/room_name, which
+        // are gone once the row is removed.
+        $this->notifications->roomDeleted($room, $request->user());
 
         $room->delete();
 
@@ -387,6 +418,10 @@ class RoomController extends Controller
         }
 
         fclose($handle);
+
+        if (! empty($created)) {
+            $this->notifications->roomsImported($created, $request->user());
+        }
 
         $createdCount = count($created);
         $skippedCount = count($skipped);

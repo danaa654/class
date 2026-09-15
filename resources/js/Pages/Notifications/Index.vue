@@ -29,6 +29,10 @@ const iconFor = (type) => ({
     SUBJECTS_IMPORTED: '📥',
     SUBJECT_UPDATED_IN_LIBRARY: '✏️',
     SUBJECT_DELETED_FROM_LIBRARY: '🗑️',
+    ROOM_CREATED: '🏫',
+    ROOMS_IMPORTED: '📥',
+    ROOM_UPDATED: '✏️',
+    ROOM_DELETED: '🗑️',
     AUTO_SCHEDULE_COMPLETED: '✅',
     AUTO_SCHEDULE_NEEDS_ATTENTION: '🛠️',
 }[type] ?? '🔔');

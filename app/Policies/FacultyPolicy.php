@@ -108,9 +108,18 @@ class FacultyPolicy
 
     /**
      * Whether the user may submit a Faculty DEACTIVATION/removal
-     * request for this Faculty member. Only Dean/OIC/Assistant Dean
-     * use this path — Admin/Registrar deactivate directly via
-     * delete() instead.
+     * request for this Faculty member. Admin/Registrar deactivate
+     * directly via delete() instead.
+     *
+     * In practice this path is now only reachable for GenEd/Minor
+     * faculty (college_id === null), i.e. Assistant Dean — a Dean/OIC
+     * requesting for their OWN College's faculty will find delete()
+     * (see its docblock) already returns true for that same faculty,
+     * so the frontend's canDeactivateDirectly check wins and this
+     * request workflow is never surfaced to them for that case. Left
+     * unchanged (rather than narrowed to Assistant-Dean-only) so nothing
+     * breaks if a Dean/OIC is ever scoped to a College they're not
+     * currently assigned to, or if direct delete is later narrowed again.
      */
     public function requestDeactivate(User $user, Faculty $faculty): bool
     {
@@ -135,15 +144,35 @@ class FacultyPolicy
     }
 
     /**
-     * Directly deactivating/removing a Faculty record is Admin/
-     * Registrar only (Faculty Management request workflow). Dean/OIC/
-     * Assistant Dean may never deactivate a Faculty record on their
-     * own — see requestDeactivate() above; they submit a
-     * FacultyRequest instead.
+     * Directly deactivating/removing a Faculty record. Admin/
+     * Registrar may always do this, for any Faculty. A Dean/OIC may
+     * also delete directly, but ONLY a Faculty member within their
+     * own College — never GenEd/Minor faculty (no College) and never
+     * another College's faculty, same scoping canAccess()/update()
+     * already enforce for edits. Assistant Dean still has NO direct
+     * delete path (GenEd/Minor faculty deletion always goes through
+     * requestDeactivate() -> Admin/Registrar approval) — this is
+     * deliberately narrower than canAccess(), which would otherwise
+     * also grant Assistant Dean direct delete over GenEd/Minor
+     * faculty.
      */
     public function delete(User $user, Faculty $faculty): bool
     {
-        return AccessScope::isUnrestricted($user);
+        if (AccessScope::isUnrestricted($user)) {
+            return true;
+        }
+
+        if ($faculty->college_id === null) {
+            // GenEd/Minor faculty — Assistant Dean's lane, but direct
+            // delete power there stays Admin/Registrar-only; even a
+            // Dean/OIC flagged with GenEd/Minor authority
+            // (is_gened_assistant_dean) only gets that authority over
+            // shared resources' DEFINITIONS, not over deleting a
+            // Faculty record outright.
+            return false;
+        }
+
+        return AccessScope::isCollegeScoped($user) && AccessScope::canAccessCollege($user, $faculty->college_id);
     }
 
     /**

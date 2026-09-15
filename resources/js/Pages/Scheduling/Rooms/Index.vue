@@ -820,11 +820,6 @@ const closeSchedule = () => {
                                 {{ data.department?.name ?? 'All Programs' }}
                             </template>
                         </Column>
-                        <Column header="Capacity" style="width: 8rem">
-                            <template #body="{ data }">
-                                {{ data.capacity }}
-                            </template>
-                        </Column>
                         <Column style="width: 14rem">
                             <template #header>
                                 <span class="flex items-center gap-1">
@@ -865,17 +860,17 @@ const closeSchedule = () => {
                                 </button>
                             </template>
                         </Column>
-                        <Column style="width: 12rem">
+                        <Column style="width: 15rem">
                             <template #header>
                                 <span class="flex items-center gap-1">
-                                    Availability
+                                    Capacity &amp; Availability
                                     <InfoPopover
-                                        title="Availability"
+                                        title="Capacity &amp; Availability"
                                         :bullets="[
                                             'Available — open slots remain this week.',
                                             'Fully Booked — no open slots remain, but no conflicts.',
                                             'Overbooked / Conflict — two or more classes overlap in this room; must be resolved before saving further schedules.',
-                                            'Seats available is based on capacity minus peak scheduled enrollment.',
+                                            'The seat count is this room\'s fixed capacity minus its peak scheduled enrollment.',
                                         ]"
                                         width="w-72"
                                     />
@@ -894,10 +889,13 @@ const closeSchedule = () => {
                                     class="text-xs text-red-600 mt-1"
                                     :title="`Peak assigned enrollment ${data.utilization.peak_enrollment} exceeds capacity ${data.utilization.capacity}`"
                                 >
-                                    Capacity exceeded — {{ data.utilization.peak_enrollment }} / {{ data.utilization.capacity }}
+                                    Capacity exceeded — {{ data.utilization.peak_enrollment }} / {{ data.capacity }}
                                 </div>
                                 <div v-else-if="data.utilization" class="text-xs text-slate-400 mt-1">
-                                    {{ data.utilization.seats_available }} seats available
+                                    {{ data.utilization.seats_available }} / {{ data.capacity }} seats available
+                                </div>
+                                <div v-else class="text-xs text-slate-400 mt-1">
+                                    {{ data.capacity }} seats
                                 </div>
                             </template>
                         </Column>

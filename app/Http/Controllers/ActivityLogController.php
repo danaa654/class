@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\ActivityLog;
 use App\Models\Faculty;
+use App\Models\Room;
 use App\Models\Section;
 use App\Models\Subject;
 use App\Models\User;
@@ -16,8 +17,9 @@ use Illuminate\Pagination\LengthAwarePaginator;
  * Administrator and Registrar see the unrestricted, institution-wide
  * log. Dean/OIC/Assistant Dean also get a read-only view (see
  * SettingsController::index()'s $canViewActivityLog), but scoped to
- * their own College via $scopeCollegeId/$sharedOnly below — same
- * ROLE + SCOPE model as App\Support\AccessScope uses elsewhere
+ * their own College (plus shared/institution-wide entries — see
+ * activityLog()'s docblock) via $scopeCollegeId/$sharedOnly below —
+ * same ROLE + SCOPE model as App\Support\AccessScope uses elsewhere
  * (Sections, Faculty qualifications, etc.), just applied here per
  * log entry's polymorphic subject instead of a direct column, since
  * ActivityLog itself doesn't store college_id.
@@ -42,15 +44,21 @@ class ActivityLogController extends Controller
      *
      * @param  ?int  $scopeCollegeId  null = unrestricted (Admin/Registrar).
      *      Otherwise restricts to entries whose subject (Faculty/
-     *      Subject/User/Section) resolves to this College. Entries
-     *      with no subject (e.g. Settings updates) or a subject type
-     *      that has no College at all (e.g. AcademicTerm) are excluded
-     *      once scoped — they aren't any one College's business.
-     * @param  bool  $sharedOnly  Assistant Dean only: ignore
-     *      $scopeCollegeId and instead show entries whose subject has
-     *      no College at all (institution-wide GenEd resources) —
-     *      Sections always belong to a College, so this never matches
-     *      Section entries.
+     *      Subject/Room/User) resolves to this College OR has no
+     *      College at all (a shared/institution-wide resource — a
+     *      GenEd/Minor Subject, an all-college Room, etc.) — same
+     *      "own College + shared" reach NotificationService's
+     *      subjectRecipients()/roomRecipients() already give a Dean/
+     *      OIC for those events, so the log isn't missing entries
+     *      they were actually notified about. Section entries are the
+     *      one exception: a Section always belongs to exactly one
+     *      College (via major->department->college_id), so those are
+     *      matched separately below and never treated as "shared".
+     * @param  bool  $sharedOnly  Assistant Dean only (a pure Assistant
+     *      Dean, not also College-scoped): ignore $scopeCollegeId
+     *      entirely and show ONLY entries whose subject has no College
+     *      at all — Sections never match this since they always
+     *      belong to a College.
      * @return array{
      *     data: list<array{id:int,actor:?string,role:?string,action:string,description:string,created_at:string}>,
      *     current_page:int, last_page:int, total:int,
@@ -67,8 +75,10 @@ class ActivityLogController extends Controller
             $query->where(function ($scoped) use ($scopeCollegeId, $sharedOnly) {
                 $scoped->whereHasMorph(
                     'subject',
-                    [Faculty::class, Subject::class, User::class],
-                    fn ($q) => $sharedOnly ? $q->whereNull('college_id') : $q->where('college_id', $scopeCollegeId)
+                    [Faculty::class, Subject::class, Room::class, User::class],
+                    fn ($q) => $sharedOnly
+                        ? $q->whereNull('college_id')
+                        : $q->where(fn ($w) => $w->where('college_id', $scopeCollegeId)->orWhereNull('college_id'))
                 );
 
                 if (! $sharedOnly) {

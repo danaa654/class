@@ -497,9 +497,12 @@ class FacultyController extends Controller
     }
 
     /**
-     * Permanently remove a faculty member from the Faculty Master
-     * (Admin/Registrar only — Dean/OIC/Assistant Dean have no direct
-     * delete path; they may still request deactivation instead, see
+     * Permanently remove a faculty member from the Faculty Master.
+     * Admin/Registrar may do this for any Faculty; a Dean/OIC may
+     * also delete directly, but only a Faculty member within their
+     * own College (see FacultyPolicy::delete()) — GenEd/Minor faculty
+     * and other Colleges' faculty still have no direct delete path
+     * for them; they submit a deactivation request instead (see
      * FacultyRequestController::storeDeactivation()).
      *
      * This is for faculty who don't belong on the roster at all (e.g.
