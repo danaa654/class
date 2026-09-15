@@ -2980,6 +2980,8 @@ const onFacultyOverride = (result, { faculty, overall_score }) => {
             }
         }
     }
+
+    recheckSiblingAutoSummaryConflicts(result.section_subject_id);
 };
 
 // Room Recommendation Selector — same instant-refresh pattern as
@@ -3005,6 +3007,8 @@ const onRoomOverride = (result, { room, overall_score }) => {
             };
         }
     }
+
+    recheckSiblingAutoSummaryConflicts(result.section_subject_id);
 };
 
 // Time Recommendation Selector — same instant-refresh pattern as
@@ -3039,6 +3043,76 @@ const onTimeOverride = (result, { time, overall_score }) => {
             },
         };
     }
+
+    recheckSiblingAutoSummaryConflicts(result.section_subject_id);
+};
+
+// BUG FIX — "stale conflict after fixing the OTHER side of it": each
+// result's conflict_details/hard_conflict is a snapshot taken when
+// that subject was scored (either during Auto Generate's initial
+// batch run, or the last time THIS row's own Faculty/Room/Time was
+// overridden). If subject A conflicted with sibling subject B (same
+// section) and the Registrar fixes it by moving B instead of A, A's
+// snapshot is never re-taken — A keeps showing "already scheduled for
+// B" forever, even though the actual day/time no longer overlaps.
+// tableConflicts (above) already recomputes Section/Faculty/Room
+// overlaps live from `rows.value`, but only for the in-page Subjects
+// table; the review modal reads the frozen per-result snapshot
+// instead. This walks every OTHER result after any override and
+// drops just the conflict_details entries that named a sibling row
+// IN THIS SAME BATCH whose current Day/Time/Faculty/Room no longer
+// actually overlaps — leaving any conflict against a subject outside
+// this batch (which can't be verified client-side) untouched.
+const recheckSiblingAutoSummaryConflicts = (changedSectionSubjectId) => {
+    const results = autoSummary.value?.results;
+    if (!results?.length) return;
+
+    const batchRowById = new Map(
+        results
+            .map((r) => rows.value.find((row) => row.id === r.section_subject_id))
+            .filter(Boolean)
+            .map((row) => [row.subject?.subject_code, row]),
+    );
+
+    results.forEach((result) => {
+        if (result.section_subject_id === changedSectionSubjectId) return;
+        const details = result.time?.conflict_details;
+        if (!Array.isArray(details) || !details.length) return;
+
+        const thisRow = rows.value.find((row) => row.id === result.section_subject_id);
+        if (!thisRow) return;
+
+        let changed = false;
+        const stillConflicting = details.filter((detail) => {
+            const siblingRow = batchRowById.get(detail.subject_code);
+            // Not a row from this batch — can't verify client-side, keep as-is.
+            if (!siblingRow || siblingRow.id === thisRow.id) return true;
+            if (!rowIsSchedulable(thisRow) || !rowIsSchedulable(siblingRow)) return true;
+
+            const sameResource = detail.resource === 'section'
+                || (detail.resource === 'faculty' && thisRow.faculty_id && thisRow.faculty_id === siblingRow.faculty_id)
+                || (detail.resource === 'room' && thisRow.room_id && thisRow.room_id === siblingRow.room_id);
+            if (!sameResource) {
+                changed = true;
+                return false;
+            }
+
+            const stillOverlaps = daysOverlap(thisRow.days, siblingRow.days)
+                && timeOverlap(thisRow.start_time, thisRow.end_time, siblingRow.start_time, siblingRow.end_time);
+            if (!stillOverlaps) changed = true;
+            return stillOverlaps;
+        });
+
+        if (!changed) return;
+
+        result.time = { ...result.time, conflict_details: stillConflicting, hard_conflict: stillConflicting.length > 0 };
+        if (thisRow.auto_generated_meta?.time?.hard_conflict !== undefined) {
+            thisRow.auto_generated_meta = {
+                ...thisRow.auto_generated_meta,
+                time: { ...thisRow.auto_generated_meta.time, hard_conflict: stillConflicting.length > 0 },
+            };
+        }
+    });
 };
 
 // Auto Schedule review panel — whether a generated result currently

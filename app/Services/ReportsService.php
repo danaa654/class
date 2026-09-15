@@ -11,6 +11,9 @@ use App\Models\SchoolYear;
 use App\Models\Section;
 use App\Models\SectionSubject;
 use App\Models\Semester;
+use App\Models\Subject;
+use App\Services\FacultyWorkloadService;
+use App\Services\RoomUtilizationService;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -31,6 +34,14 @@ class ReportsService
 {
     /** Every report type this service knows how to generate, grouped for the sidebar/select. */
     public const REPORT_GROUPS = [
+        // Plain master-data rosters — no scheduling/term data at all,
+        // unlike every other group below. Just "everyone/everything
+        // currently on file", optionally narrowed by College/Program.
+        'Lists' => [
+            'faculty_list' => 'Faculty List',
+            'room_list' => 'Room List',
+            'subject_list' => 'Subject List',
+        ],
         'Scheduling' => [
             'master_schedule' => 'Master Schedule',
             'schedule_by_section' => 'Schedule by Section',
@@ -62,6 +73,13 @@ class ReportsService
         private readonly ScheduleConflictService $conflicts,
         private readonly FacultyScheduleEmailService $facultyScheduleEmail,
         private readonly SignoffService $signoff,
+        // Only for facultyList()/roomList() below — reused rather than
+        // re-derived so those two plain rosters show the exact same
+        // Teaching Load / Utilization/Availability figures as the
+        // Faculty Master and Rooms pages themselves, never a
+        // second, possibly-drifting computation of the same numbers.
+        private readonly FacultyWorkloadService $workload,
+        private readonly RoomUtilizationService $roomUtilization,
     ) {}
 
     /**
@@ -138,6 +156,9 @@ class ReportsService
     public function generate(string $reportType, array $filters): array
     {
         $result = match ($reportType) {
+            'faculty_list' => $this->facultyList($filters),
+            'room_list' => $this->roomList($filters),
+            'subject_list' => $this->subjectList($filters),
             'master_schedule' => $this->masterSchedule($filters),
             'schedule_by_section' => $this->scheduleBySection($filters),
             'schedule_by_faculty' => $this->scheduleByFaculty($filters),
@@ -820,6 +841,242 @@ class ReportsService
         ]);
     }
 
+    /**
+     * Plain Faculty roster — every Faculty member currently on file
+     * (no scheduling/term data at all, unlike every other report in
+     * this service), optionally narrowed to one College/Program. Same
+     * columns as the Faculty Master page itself (Faculty ID, Name,
+     * Employment Status, College, Max Teaching Units, Teaching Load,
+     * Status) — including Teaching Load, via the same
+     * FacultyWorkloadService::evaluateMany() the Faculty Master page
+     * uses, so this never shows a different current/max than what's
+     * on screen. Deliberately independent of sectionSubjectsQuery()/
+     * Section scoping — a Faculty member with no current teaching
+     * load at all still belongs on this list.
+     */
+    private function facultyList(array $filters): array
+    {
+        $faculty = Faculty::query()
+            ->with('college')
+            ->when($filters['college_id'] ?? null, fn ($q, $v) => $q->where('college_id', $v))
+            ->orderBy('last_name')
+            ->orderBy('first_name')
+            ->get();
+
+        $workloads = $this->workload->evaluateMany($faculty);
+
+        $rows = $faculty->map(function (Faculty $f) use ($workloads) {
+            $w = $workloads[$f->id] ?? null;
+
+            return [
+                'Faculty ID' => $f->faculty_id,
+                'Faculty Name' => $f->full_name,
+                'Employment Status' => $f->employment_type,
+                'College' => $f->college?->name ?? 'General Education',
+                'Max Teaching Units' => $f->max_teaching_units,
+                'Teaching Load' => $w ? "{$w['current']} / {$w['max']} {$w['unit_label']}" : '—',
+                'Status' => $f->status,
+            ];
+        })->values();
+
+        return $this->table('Faculty List', $rows, emptyMessage: 'No faculty found for the selected filters.');
+    }
+
+    /**
+     * Plain Room roster — every Room currently on file, optionally
+     * narrowed to one College/Program. Same columns as the Rooms page
+     * itself (Room Name, Building, Floor, Room Type, College,
+     * Department/Program, Capacity, Utilization, Availability,
+     * Status) — including Utilization/Availability, via the same
+     * RoomUtilizationService::summarizeRooms() the Rooms page uses.
+     * Same "no scheduling data at all" independence as facultyList()
+     * above.
+     */
+    private function roomList(array $filters): array
+    {
+        $rooms = Room::query()
+            ->with(['college', 'department'])
+            ->when($filters['college_id'] ?? null, fn ($q, $v) => $q->where('college_id', $v))
+            ->orderBy('room_code')
+            ->get();
+
+        $summaries = $this->roomUtilization->summarizeRooms($rooms);
+
+        $rows = $rooms->map(function (Room $room) use ($summaries) {
+            $summary = $summaries[$room->id] ?? null;
+
+            return [
+                'Room Name' => $room->room_name,
+                'Building' => $room->building,
+                'Floor' => $room->floor ?: '—',
+                'Room Type' => $room->room_type,
+                'College' => $room->college?->name ?? 'All Colleges',
+                'Department / Program' => $room->department?->name ?? 'All Programs',
+                'Capacity' => $room->capacity,
+                'Utilization' => $summary ? "{$summary['scheduled_hours']} / {$summary['max_hours']} hrs ({$summary['utilization_percent']}%)" : '—',
+                'Availability' => $summary['availability'] ?? '—',
+                'Status' => $room->status,
+            ];
+        })->values();
+
+        return $this->table('Room List', $rows, emptyMessage: 'No rooms found for the selected filters.');
+    }
+
+    /**
+     * Plain Subject roster — every Subject currently on file,
+     * optionally narrowed to one College/Program. Same columns as the
+     * Subject Library page itself (Subject Code, Subject Title,
+     * Category, Subject Type, College, Major(s), Units, Lecture
+     * Hours, Lab Hours, Required Hours, Status) — same "no scheduling
+     * data at all" independence as facultyList()/roomList() above,
+     * this is the Subject master list itself, not which Sections
+     * currently carry it.
+     */
+    private function subjectList(array $filters): array
+    {
+        $rows = Subject::query()
+            ->with(['college', 'majors'])
+            ->when($filters['college_id'] ?? null, fn ($q, $v) => $q->where('college_id', $v))
+            ->orderBy('subject_code')
+            ->get()
+            ->map(fn (Subject $subject) => [
+                'Subject Code' => $subject->subject_code,
+                'Subject Title' => $subject->subject_title,
+                'Category' => $subject->category,
+                'Subject Type' => $subject->subject_type === 'practicum' ? 'Practicum / OJT' : 'Regular',
+                'College' => $subject->college?->code ?? '—',
+                'Major(s)' => $subject->majors->count() ? $subject->majors->pluck('code')->implode(', ') : '—',
+                'Units' => $subject->units,
+                'Lecture Hours' => $subject->subject_type === 'practicum' ? '—' : $subject->lecture_hours,
+                'Lab Hours' => $subject->subject_type === 'practicum' ? '—' : $subject->laboratory_hours,
+                'Required Hours' => $subject->subject_type === 'practicum' ? ($subject->required_hours ?? '—') : '—',
+                'Status' => $subject->is_active ? 'Active' : 'Inactive',
+            ])
+            ->values();
+
+        return $this->table('Subject List', $rows, emptyMessage: 'No subjects found for the selected filters.');
+    }
+
+    /**
+     * Faculty rows shaped for re-import — same header order and value
+     * shape (college CODE, not name/id) as
+     * FacultyController::importTemplate()/import(), so the file this
+     * produces can be fed straight back into Bulk Import with zero
+     * reshaping. Kept in lockstep with that template by hand — if its
+     * column list ever changes, update both.
+     */
+    public function facultyImportRows(array $filters): array
+    {
+        $columns = [
+            'faculty_id', 'first_name', 'middle_name', 'last_name', 'suffix',
+            'employment_type', 'college', 'max_teaching_units', 'workload_type',
+            'max_weekly_hours', 'status', 'email', 'contact_number', 'remarks',
+        ];
+
+        $rows = Faculty::query()
+            ->with('college')
+            ->when($filters['college_id'] ?? null, fn ($q, $v) => $q->where('college_id', $v))
+            ->orderBy('last_name')
+            ->orderBy('first_name')
+            ->get()
+            ->map(fn (Faculty $f) => [
+                'faculty_id' => $f->faculty_id,
+                'first_name' => $f->first_name,
+                'middle_name' => $f->middle_name,
+                'last_name' => $f->last_name,
+                'suffix' => $f->suffix,
+                'employment_type' => $f->employment_type,
+                'college' => $f->college?->code ?? '',
+                'max_teaching_units' => $f->max_teaching_units,
+                'workload_type' => $f->workload_type,
+                'max_weekly_hours' => $f->max_weekly_hours,
+                'status' => $f->status,
+                'email' => $f->email,
+                'contact_number' => $f->contact_number,
+                'remarks' => $f->remarks,
+            ])
+            ->values();
+
+        return ['columns' => $columns, 'rows' => $rows];
+    }
+
+    /**
+     * Room rows shaped for re-import — same header order/value shape
+     * as RoomController::importTemplate()/import() (college/department
+     * CODES; room_code is deliberately never included, since Import
+     * always auto-derives it from Room Name, same as the Add Room
+     * form). Kept in lockstep with that template by hand.
+     */
+    public function roomImportRows(array $filters): array
+    {
+        $columns = [
+            'room_name', 'building', 'floor', 'room_type',
+            'room_category', 'college', 'department', 'capacity', 'status', 'remarks',
+        ];
+
+        $rows = Room::query()
+            ->with(['college', 'department'])
+            ->when($filters['college_id'] ?? null, fn ($q, $v) => $q->where('college_id', $v))
+            ->orderBy('room_code')
+            ->get()
+            ->map(fn (Room $room) => [
+                'room_name' => $room->room_name,
+                'building' => $room->building,
+                'floor' => $room->floor,
+                'room_type' => $room->room_type,
+                'room_category' => $room->room_category,
+                'college' => $room->college?->code ?? '',
+                'department' => $room->department?->code ?? '',
+                'capacity' => $room->capacity,
+                'status' => $room->status,
+                'remarks' => $room->remarks,
+            ])
+            ->values();
+
+        return ['columns' => $columns, 'rows' => $rows];
+    }
+
+    /**
+     * Subject rows shaped for re-import — same header order/value
+     * shape as SubjectController::importTemplate()/import()
+     * (college CODE, majors as ;-joined CODES, lowercase subject_type,
+     * plain "Active"/"Inactive" status). Kept in lockstep with that
+     * template by hand.
+     */
+    public function subjectImportRows(array $filters): array
+    {
+        $columns = [
+            'subject_code', 'subject_title', 'category', 'subject_type', 'college',
+            'majors', 'units', 'lecture_hours', 'laboratory_hours', 'required_hours',
+            'deployment_type', 'preferred_room_category', 'status', 'description',
+        ];
+
+        $rows = Subject::query()
+            ->with(['college', 'majors'])
+            ->when($filters['college_id'] ?? null, fn ($q, $v) => $q->where('college_id', $v))
+            ->orderBy('subject_code')
+            ->get()
+            ->map(fn (Subject $subject) => [
+                'subject_code' => $subject->subject_code,
+                'subject_title' => $subject->subject_title,
+                'category' => $subject->category,
+                'subject_type' => $subject->subject_type ?: 'regular',
+                'college' => $subject->college?->code ?? '',
+                'majors' => $subject->majors->count() ? $subject->majors->pluck('code')->implode(';') : '',
+                'units' => $subject->units,
+                'lecture_hours' => $subject->lecture_hours,
+                'laboratory_hours' => $subject->laboratory_hours,
+                'required_hours' => $subject->required_hours,
+                'deployment_type' => $subject->deployment_type,
+                'preferred_room_category' => $subject->preferred_room_category,
+                'status' => $subject->is_active ? 'Active' : 'Inactive',
+                'description' => $subject->description,
+            ])
+            ->values();
+
+        return ['columns' => $columns, 'rows' => $rows];
+    }
+
     // ------------------------------------------------------------
     // C. Room Reports
     // ------------------------------------------------------------
@@ -1142,6 +1399,159 @@ class ReportsService
             'rows' => $rows,
             'summary' => $summary,
             'empty_message' => $emptyMessage ?? 'No data found for the selected filters.',
+        ];
+    }
+
+    /**
+     * Server-side port of Reports/Index.vue's gridDays/gridHourRows/
+     * gridBlocks computeds — builds the same weekly-timetable data the
+     * on-screen Grid view renders, so the printable copy (print.blade.php)
+     * can lay it out as an actual grid instead of falling back to the
+     * generic flat-table dump. Deliberately kept in lockstep with the
+     * Vue version: same 30-min-row math, same day-presence filtering,
+     * same same-cell merge collapsing — a printed grid should never
+     * show something the on-screen Grid wouldn't.
+     *
+     * @param  array<int, array<string, mixed>>  $rows  Report rows (schedule_by_room or schedule_by_faculty's flat shape — Room/Subject/Section/Faculty/Day/Start/End, optionally carrying a 'Schedules' sub-array for split Face-to-Face/Online rows)
+     * @param  array{start_time: string, end_time: string, available_days: array<int, string>, interval_minutes: int}  $schedulingWindow
+     */
+    public function buildGridData(array $rows, array $schedulingWindow, string $reportType): array
+    {
+        $toMinutes = fn (string $hhmm): int => (function () use ($hhmm) {
+            [$h, $m] = array_pad(explode(':', $hhmm ?: '00:00'), 2, '0');
+
+            return ((int) $h) * 60 + (int) $m;
+        })();
+        $toHHMM = fn (int $minutes): string => sprintf('%02d:%02d', intdiv($minutes, 60) % 24, $minutes % 60);
+        $formatHourLabel = function (string $hhmm) use ($toMinutes): string {
+            $mins = $toMinutes($hhmm);
+            $h = intdiv($mins, 60);
+            $m = $mins % 60;
+            $period = $h >= 12 ? 'PM' : 'AM';
+            $h12 = $h % 12 === 0 ? 12 : $h % 12;
+
+            return sprintf('%d:%02d %s', $h12, $m, $period);
+        };
+        // Report rows carry the already-12h-formatted "5:00 PM" string
+        // (not a raw sortable "H:i" value) — parses it back into the
+        // same minute space $toMinutes/hourRows use, same as
+        // Index.vue's timeToMinutes12h().
+        $timeToMinutes12h = function (?string $label): ?int {
+            if (! $label || ! preg_match('/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i', trim($label), $m)) {
+                return null;
+            }
+            $hours = ((int) $m[1]) % 12;
+            if (strtoupper($m[3]) === 'PM') {
+                $hours += 12;
+            }
+
+            return $hours * 60 + (int) $m[2];
+        };
+
+        $interval = $schedulingWindow['interval_minutes'] ?: 30;
+        $start = $toMinutes($schedulingWindow['start_time'] ?: '07:00');
+        $end = $toMinutes($schedulingWindow['end_time'] ?: '17:00');
+
+        $hourRows = [];
+        for ($t = $start; $t < $end; $t += $interval) {
+            $hourRows[] = $toHHMM($t);
+        }
+        if (! $hourRows) {
+            $hourRows = ['07:00', '07:30', '08:00'];
+        }
+
+        $allDays = $schedulingWindow['available_days'] ?: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+        // Same rowSchedules() fallback as Index.vue: use the row's own
+        // 'Schedules' sub-array when present (split Face-to-Face/Online),
+        // otherwise treat the row's flat Room/Day/Start/End as its one
+        // meeting.
+        $rowSchedules = fn (array $row): array => ! empty($row['Schedules'])
+            ? $row['Schedules']
+            : [['Room' => $row['Room'] ?? null, 'Day' => $row['Day'] ?? null, 'Start' => $row['Start'] ?? null, 'End' => $row['End'] ?? null]];
+
+        $present = [];
+        foreach ($rows as $row) {
+            foreach ($rowSchedules($row) as $schedule) {
+                foreach (array_filter(array_map('trim', explode(',', $schedule['Day'] ?? ''))) as $day) {
+                    $present[$day] = true;
+                }
+            }
+        }
+        $days = array_values(array_filter($allDays, fn ($d) => isset($present[$d])));
+
+        $blocks = [];
+        foreach ($rows as $row) {
+            foreach ($rowSchedules($row) as $schedule) {
+                $startMin = $timeToMinutes12h($schedule['Start'] ?? null);
+                $endMin = $timeToMinutes12h($schedule['End'] ?? null);
+                if ($startMin === null || $endMin === null) {
+                    continue;
+                }
+
+                $startIndex = max(0, (int) round(($startMin - $start) / $interval));
+                $span = max(1, (int) round(($endMin - $startMin) / $interval));
+
+                foreach (array_filter(array_map('trim', explode(',', $schedule['Day'] ?? ''))) as $day) {
+                    if (! in_array($day, $days, true)) {
+                        continue;
+                    }
+                    $blocks[] = array_merge($row, $schedule, [
+                        'day' => $day,
+                        'startIndex' => $startIndex,
+                        'span' => $span,
+                    ]);
+                }
+            }
+        }
+
+        // Merged/shared sessions (a faculty-shortage merge running one
+        // Online lecture for two independent Sections at once) — collapse
+        // same-cell, same-meeting blocks into one, joining Sections with
+        // "/" and flagging merged, same as Index.vue's gridBlocks merge
+        // step.
+        $mergedBlocks = [];
+        $seen = [];
+        foreach ($blocks as $block) {
+            $key = implode('|', [$block['day'], $block['startIndex'], $block['span'], $block['Room'] ?? '', $block['Subject'] ?? '']);
+            if (isset($seen[$key])) {
+                $i = $seen[$key];
+                $sections = explode('/', $mergedBlocks[$i]['Section'] ?? '');
+                if (! in_array($block['Section'] ?? '', $sections, true)) {
+                    $mergedBlocks[$i]['Section'] = ($mergedBlocks[$i]['Section'] ?? '').'/'.($block['Section'] ?? '');
+                    $mergedBlocks[$i]['merged'] = true;
+                }
+                continue;
+            }
+            $seen[$key] = count($mergedBlocks);
+            $mergedBlocks[] = $block;
+        }
+
+        // Grid cell label lines — Room report shows Subject/Section/
+        // Faculty; Faculty report shows Subject/Section/Room, same as
+        // Index.vue's gridCellLabel().
+        foreach ($mergedBlocks as &$block) {
+            $isOnline = ($block['Room'] ?? null) === 'Online';
+            if ($reportType === 'schedule_by_room') {
+                $block['line1'] = $block['Subject'] ?? null;
+                $block['line2'] = $block['Section'] ?? null;
+                $block['line3'] = $block['Faculty'] ?? null;
+            } else {
+                $block['line1'] = $block['Subject'] ?? null;
+                $block['line2'] = $block['Section'] ?? null;
+                $block['line3'] = ! empty($block['merged']) ? (($block['Room'] ?? '').'/Merge') : ($block['Room'] ?? null);
+            }
+            $block['online'] = $isOnline;
+        }
+        unset($block);
+
+        return [
+            'days' => $days,
+            'hourRows' => array_map(fn ($hhmm) => [
+                'value' => $hhmm,
+                'label' => $formatHourLabel($hhmm).' – '.$formatHourLabel($toHHMM($toMinutes($hhmm) + $interval)),
+            ], $hourRows),
+            'blocks' => $mergedBlocks,
         ];
     }
 }

@@ -533,7 +533,7 @@ const needsSection = computed(() => ['schedule_by_section', 'section_subjects'].
 // itself, not Year Level or Section Type on top of that. No report type
 // selected yet still shows the full set, so the form isn't empty before
 // a choice is made.
-const ROOM_OR_FACULTY_REPORT_TYPES = ['schedule_by_room', 'room_utilization', 'room_conflicts', 'schedule_by_faculty', 'faculty_teaching_load'];
+const ROOM_OR_FACULTY_REPORT_TYPES = ['schedule_by_room', 'room_utilization', 'room_conflicts', 'schedule_by_faculty', 'faculty_teaching_load', 'faculty_list', 'room_list', 'subject_list'];
 const showProgramScopedFilters = computed(() => !reportType.value || !ROOM_OR_FACULTY_REPORT_TYPES.includes(reportType.value));
 
 // Clear Major/Year Level/Section Type when they become hidden for the
@@ -603,10 +603,33 @@ function printReport() {
     // screen — rather than window.print()-ing the SPA page itself,
     // which used to print the app's own chrome/columns instead of a
     // proper school-letterhead document.
-    window.open(route('reports.print', buildQuery()), '_blank');
+    //
+    // view_mode carries over whichever tab (Table/Grid) is active on
+    // screen, so hitting Print while looking at the Grid view prints an
+    // actual grid instead of always falling back to the flat table —
+    // only sent when Grid is actually enabled (see gridEnabled), since
+    // the print route re-validates eligibility itself anyway.
+    const query = buildQuery();
+    if (gridEnabled.value && viewMode.value === 'grid') {
+        query.view_mode = 'grid';
+    }
+    window.open(route('reports.print', query), '_blank');
 }
 
+// Faculty/Room/Subject List reports export in Bulk-Import-ready shape
+// (column headers + codes, not display labels) via a dedicated server
+// route (see ReportsController::exportImportCsv()) rather than the
+// generic client-side export below — so the file this downloads can be
+// fed straight back into Faculty/Rooms/Subjects → Import with no
+// reshaping.
+const IMPORTABLE_LIST_REPORT_TYPES = ['faculty_list', 'room_list', 'subject_list'];
+
 function exportCsv() {
+    if (IMPORTABLE_LIST_REPORT_TYPES.includes(reportType.value)) {
+        window.open(route('reports.export-import-csv', buildQuery()), '_blank');
+        return;
+    }
+
     if (!props.report || !props.report.rows.length) return;
     const columns = props.report.columns;
     const escape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;

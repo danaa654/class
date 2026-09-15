@@ -18,13 +18,21 @@
         .letterhead {
             display: flex;
             align-items: center;
+            justify-content: space-between;
             gap: 14px;
             border-bottom: 2px solid #1e293b;
             padding-bottom: 12px;
             margin-bottom: 16px;
         }
 
-        .letterhead img {
+        .letterhead-school {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            min-width: 0;
+        }
+
+        .letterhead-school img {
             height: 56px;
             width: 56px;
             object-fit: contain;
@@ -110,12 +118,23 @@
             gap: 6px;
         }
 
-        /* ---- Classly text credit strip (sits above the school letterhead) ---- */
-        .classly-brand {
-            margin-bottom: 6px;
+        /* ---- Classly text credit (now lives at the right of the
+           letterhead row, next to the app's own icon — see
+           .letterhead-brand below) ---- */
+        .letterhead-brand {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
         }
 
-        .classly-brand span {
+        .letterhead-brand img {
+            height: 20px;
+            width: 20px;
+            object-fit: contain;
+        }
+
+        .letterhead-brand span {
             font-size: 11px;
             font-weight: 800;
             letter-spacing: 0.08em;
@@ -227,11 +246,94 @@
             margin-bottom: 0;
         }
 
+        /* ---- Grid (weekly-timetable) print — same 30-min-row layout
+           as Reports/Index.vue's on-screen Grid view (RoomGrid.vue-style
+           read-only mirror), built server-side by
+           ReportsService::buildGridData() so it never drifts from what
+           was actually on screen when Print was clicked. An HTML table
+           with rowspan (rather than a CSS grid) since that's what prints
+           most reliably across browsers. ---- */
+        .grid-table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+
+        .grid-table th,
+        .grid-table td {
+            border: 1px solid #cbd5e1;
+        }
+
+        .grid-table thead th {
+            background: #1e293b;
+            color: #ffffff;
+            text-align: center;
+            font-size: 10.5px;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            padding: 6px 4px;
+        }
+
+        .grid-table thead th.grid-corner {
+            width: 92px;
+        }
+
+        .grid-time-cell {
+            padding: 3px 6px;
+            font-size: 9px;
+            font-weight: 600;
+            color: #475569;
+            background: #f8fafc;
+            white-space: nowrap;
+            vertical-align: middle;
+        }
+
+        .grid-block-cell {
+            padding: 4px 6px;
+            vertical-align: top;
+            background: #ecfdf5;
+        }
+
+        .grid-block-cell.online {
+            background: #eff6ff;
+        }
+
+        .grid-block-subject {
+            font-weight: 700;
+            font-size: 10px;
+            color: #065f46;
+        }
+
+        .grid-block-cell.online .grid-block-subject {
+            color: #1d4ed8;
+        }
+
+        .grid-block-line {
+            font-size: 9.5px;
+            color: #334155;
+            margin-top: 1px;
+        }
+
+        .grid-empty-cell {
+            padding: 0;
+        }
+
         @media print {
             body { padding: 0 24px; }
             @page { margin: 18mm 14mm; }
         }
     </style>
+    @if($gridData)
+        {{-- Landscape only for the Grid print — every other report type
+             on this same blade (Study Load, faculty tables, etc.) stays
+             portrait, so this is scoped to its own <style> tag rather
+             than folded into the unconditional @page rule above. --}}
+        <style>
+            @media print {
+                @page { size: landscape; }
+            }
+        </style>
+    @endif
 </head>
 <body>
 
@@ -252,6 +354,64 @@
     @if(! $report || empty($report['rows']) || count($report['rows']) === 0)
 
         <p class="empty">{{ $report['empty_message'] ?? 'No data found for the selected filters.' }}</p>
+
+    @elseif($gridData)
+
+        {{-- Grid (weekly-timetable) print — mirrors Reports/Index.vue's
+             on-screen Grid view, built from ReportsService::buildGridData().
+             $gridBlocksByCell/$gridCovered pre-index the blocks by
+             [day][hour-row index] so each day column can either start a
+             rowspan'd block, skip a cell already covered by one, or
+             render an empty slot — same "one block, several covered
+             rows" shape RoomGrid.vue's own read-only mirror uses. --}}
+        @php
+            $gridBlocksByCell = [];
+            $gridCovered = [];
+            foreach ($gridData['blocks'] as $block) {
+                $gridBlocksByCell[$block['day']][$block['startIndex']] = $block;
+                for ($i = $block['startIndex'] + 1; $i < $block['startIndex'] + $block['span']; $i++) {
+                    $gridCovered[$block['day']][$i] = true;
+                }
+            }
+        @endphp
+
+        <h2 class="section-heading">
+            {{ $reportType === 'schedule_by_room' ? $roomLabel : ($report['facultyMeta']['full_name'] ?? '') }}
+        </h2>
+
+        <table class="grid-table">
+            <thead>
+                <tr>
+                    <th class="grid-corner"></th>
+                    @foreach($gridData['days'] as $day)
+                        <th>{{ $day }}</th>
+                    @endforeach
+                </tr>
+            </thead>
+            <tbody>
+                @foreach($gridData['hourRows'] as $rowIndex => $hourRow)
+                    <tr>
+                        <td class="grid-time-cell">{{ $hourRow['label'] }}</td>
+                        @foreach($gridData['days'] as $day)
+                            @if(isset($gridBlocksByCell[$day][$rowIndex]))
+                                @php($block = $gridBlocksByCell[$day][$rowIndex])
+                                <td class="grid-block-cell @if($block['online']) online @endif" rowspan="{{ $block['span'] }}">
+                                    <p class="grid-block-subject">{{ $block['line1'] }}</p>
+                                    <p class="grid-block-line">{{ $block['line2'] }}</p>
+                                    <p class="grid-block-line">{{ $block['line3'] }}</p>
+                                </td>
+                            @elseif(! isset($gridCovered[$day][$rowIndex]))
+                                <td class="grid-empty-cell"></td>
+                            @endif
+                        @endforeach
+                    </tr>
+                @endforeach
+            </tbody>
+        </table>
+
+        @if($reportType === 'schedule_by_faculty' && !empty($report['facultyMeta']))
+            @include('reports.partials.faculty-signoff', ['facultyName' => $report['facultyMeta']['full_name'], 'deans' => $report['facultyMeta']['deans'] ?? [], 'approvers' => $report['facultyMeta']['approvers'] ?? []])
+        @endif
 
     @elseif($reportType === 'schedule_by_section' && !empty($report['groups']))
 

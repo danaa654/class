@@ -89,10 +89,39 @@ const generalForm = useForm({
     school_address: props.settings['general.school_address'] ?? '',
     school_contact: props.settings['general.school_contact'] ?? '',
     school_email: props.settings['general.school_email'] ?? '',
+    logo: null,
 });
+
+// School Logo — shows the currently-saved logo (school_logo_path,
+// same URL the print reports' letterhead falls back to) until the
+// Registrar picks a new file, at which point this swaps to a local
+// object-URL preview of the picked file so they see exactly what
+// they're about to save without waiting on a round trip.
+const logoPreviewUrl = ref(props.settings['general.school_logo_path'] || null);
+const logoInput = ref(null);
+const triggerLogoPicker = () => logoInput.value?.click();
+const onLogoSelected = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    generalForm.logo = file;
+    if (logoPreviewUrl.value && logoPreviewUrl.value.startsWith('blob:')) {
+        URL.revokeObjectURL(logoPreviewUrl.value);
+    }
+    logoPreviewUrl.value = URL.createObjectURL(file);
+};
+const removeLogoSelection = () => {
+    generalForm.logo = null;
+    if (logoPreviewUrl.value && logoPreviewUrl.value.startsWith('blob:')) {
+        URL.revokeObjectURL(logoPreviewUrl.value);
+    }
+    logoPreviewUrl.value = props.settings['general.school_logo_path'] || null;
+    if (logoInput.value) logoInput.value.value = '';
+};
+
 const saveGeneral = () => {
     generalForm.transform((data) => ({ ...data, _method: 'put' })).post(route('settings.general.update'), {
         preserveScroll: true,
+        forceFormData: true,
         onError,
     });
 };
@@ -286,6 +315,26 @@ const onUpdateAccount = () => {
                             <template #content>
                                 <h2 class="text-lg font-bold text-[#1E293B] mb-1">General</h2>
                                 <p class="text-sm text-slate-500 mb-6">School identity shown across the system.</p>
+
+                                <!-- School Logo — used across the system's letterhead, and as
+                                     the fallback logo image on every printed report (see
+                                     resources/views/reports/partials/letterhead.blade.php). -->
+                                <div class="flex items-center gap-4 mb-7">
+                                    <div class="w-20 h-20 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden shrink-0">
+                                        <img v-if="logoPreviewUrl" :src="logoPreviewUrl" alt="School Logo" class="w-full h-full object-contain" />
+                                        <i v-else class="pi pi-image text-2xl text-slate-300"></i>
+                                    </div>
+                                    <div>
+                                        <p class="text-sm font-medium text-slate-700 mb-1">School Logo</p>
+                                        <p class="text-xs text-slate-500 mb-2">Shown on the letterhead and printed reports. PNG or JPG, up to 2MB.</p>
+                                        <div class="flex items-center gap-2" v-if="canEdit('general')">
+                                            <Button label="Upload Logo" icon="pi pi-upload" size="small" outlined @click="triggerLogoPicker" />
+                                            <Button v-if="generalForm.logo" label="Cancel" icon="pi pi-times" size="small" text severity="secondary" @click="removeLogoSelection" />
+                                            <input ref="logoInput" type="file" accept="image/*" class="hidden" @change="onLogoSelected" />
+                                        </div>
+                                        <p v-if="generalForm.errors.logo" class="text-xs text-red-500 mt-1">{{ generalForm.errors.logo }}</p>
+                                    </div>
+                                </div>
 
                                 <fieldset :disabled="!canEdit('general')" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-7">
                                     <FloatLabel variant="on">

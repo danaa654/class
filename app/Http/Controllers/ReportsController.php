@@ -111,6 +111,14 @@ class ReportsController extends Controller
             ? Section::query()->find($filters['section_id'], ['id', 'section_code'])
             : null;
 
+        // Room label for the Schedule by Room grid print's heading (same
+        // "name it once at the top" convention as $sectionLabel above) —
+        // only ever a single Room, since Grid requires one specific Room
+        // chosen (see gridEnabled's docblock in Index.vue).
+        $room = ($reportType === 'schedule_by_room' && ! empty($filters['room_id']) && ! is_array($filters['room_id']))
+            ? \App\Models\Room::query()->find($filters['room_id'], ['id', 'room_code'])
+            : null;
+
         $general = $this->settings->group('general');
 
         $report = $reportType !== '' ? $this->reports->generate($reportType, $cleanFilters) : null;
@@ -124,9 +132,35 @@ class ReportsController extends Controller
             $report['title'] = 'Study Load';
         }
 
+        // Grid print — only when the on-screen Grid toggle itself would be
+        // offered (Reports/Index.vue's gridEnabled): Schedule by Room
+        // scoped to one specific Room, or Schedule by Faculty scoped to
+        // exactly one Faculty member (never "All Rooms"/"All Faculty" or
+        // several at once — see gridEnabled's docblock in Index.vue for
+        // why mixing several into one grid would misattribute cells).
+        // view_mode itself is just what the Print button happened to send
+        // (whichever tab — Table/Grid — was active on screen); re-checking
+        // eligibility here means a stale/hand-edited query string can
+        // never force a grid print that wouldn't make sense.
+        $gridData = null;
+        if ($request->query('view_mode') === 'grid' && $report && ! empty($report['rows'])) {
+            $gridEligible = ($reportType === 'schedule_by_room' && ! empty($cleanFilters['room_id']))
+                || ($reportType === 'schedule_by_faculty' && ! empty($report['facultyMeta']));
+
+            if ($gridEligible) {
+                $gridData = $this->reports->buildGridData(
+                    $report['rows']->all(),
+                    $this->schedulingWindowFor($filters['academic_year'] ?: null),
+                    $reportType,
+                );
+            }
+        }
+
         return view('reports.print', [
             'report' => $report,
             'reportType' => $reportType,
+            'gridData' => $gridData,
+            'roomLabel' => $room?->room_code,
             'academicYear' => $filters['academic_year'],
             'semester' => $filters['semester'],
             'sectionLabel' => $section?->section_code,
