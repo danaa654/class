@@ -77,6 +77,19 @@ class ActivityLogService
 
     public const SUBJECT_REMOVED_FROM_SECTION = 'SUBJECT_REMOVED_FROM_SECTION';
 
+    // A Subject was added to (or bulk-imported into) the Subject
+    // Library master list itself — distinct from
+    // SUBJECT_ADDED_TO_SECTION above, which is about attaching an
+    // existing Subject to a Section's schedule. See
+    // NotificationService::subjectCreated()/subjectsImported().
+    public const SUBJECT_CREATED = 'SUBJECT_CREATED';
+
+    public const SUBJECT_IMPORTED = 'SUBJECT_IMPORTED';
+
+    public const SUBJECT_UPDATED = 'SUBJECT_UPDATED';
+
+    public const SUBJECT_DELETED = 'SUBJECT_DELETED';
+
     public const SESSION_FORCE_LOGOUT = 'SESSION_FORCE_LOGOUT';
 
     public const PASSWORD_RESET_REQUESTED = 'PASSWORD_RESET_REQUESTED';
@@ -119,6 +132,10 @@ class ActivityLogService
             self::SCHEDULE_UPDATED,
             self::SUBJECT_ADDED_TO_SECTION,
             self::SUBJECT_REMOVED_FROM_SECTION,
+            self::SUBJECT_CREATED,
+            self::SUBJECT_IMPORTED,
+            self::SUBJECT_UPDATED,
+            self::SUBJECT_DELETED,
             self::SESSION_FORCE_LOGOUT,
             self::PASSWORD_RESET_REQUESTED,
             self::PASSWORD_CHANGE_REQUIRED,

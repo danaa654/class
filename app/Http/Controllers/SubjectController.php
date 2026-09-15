@@ -8,6 +8,7 @@ use App\Http\Requests\UpdateSubjectRequest;
 use App\Models\College;
 use App\Models\Major;
 use App\Models\Subject;
+use App\Services\NotificationService;
 use App\Support\AccessScope;
 use App\Support\RoomCategories;
 use Illuminate\Http\JsonResponse;
@@ -22,6 +23,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SubjectController extends Controller
 {
+    public function __construct(private readonly NotificationService $notifications) {}
+
     /**
      * Display the Subject Library page.
      *
@@ -114,6 +117,8 @@ class SubjectController extends Controller
         $subject = Subject::create($data);
         $subject->majors()->sync($majorIds);
 
+        $this->notifications->subjectCreated($subject, $request->user());
+
         return redirect()->route('subjects')->with('success', 'Subject created successfully.');
     }
 
@@ -131,8 +136,31 @@ class SubjectController extends Controller
         $data['is_active'] = $data['is_active'] ?? true;
         $data['major_id'] = $majorIds[0] ?? null;
 
-        $subject->update($data);
+        // Fill (don't save yet) so getDirty() tells us exactly which
+        // columns actually changed value, not just which keys were
+        // present in the form payload — same convention as
+        // FacultyController::update(). Cosmetic/free-text fields
+        // (description, deployment_remarks, preferred_room_category)
+        // are left out of the notification the same way Faculty's
+        // remarks/contact info are, per spec ("do not generate
+        // unnecessary notifications for insignificant UI changes").
+        $subject->fill($data);
+        $changedFields = array_intersect(
+            array_keys($subject->getDirty()),
+            ['subject_code', 'subject_title', 'category', 'college_id', 'subject_type', 'units', 'lecture_hours', 'laboratory_hours', 'required_hours', 'is_active'],
+        );
+        $changes = array_map(fn (string $field) => [
+            'field' => $field,
+            'old' => $subject->getOriginal($field),
+            'new' => $subject->{$field},
+        ], $changedFields);
+
+        $subject->save();
         $subject->majors()->sync($majorIds);
+
+        if (! empty($changes)) {
+            $this->notifications->subjectUpdated($subject, $request->user(), $changes);
+        }
 
         return redirect()->route('subjects')->with('success', 'Subject updated successfully.');
     }
@@ -144,7 +172,7 @@ class SubjectController extends Controller
      * the Curriculum only ever references the master Subject, so
      * deleting it here would silently break that Curriculum's structure.
      */
-    public function destroy(Subject $subject): RedirectResponse
+    public function destroy(Request $request, Subject $subject): RedirectResponse
     {
         $this->authorize('delete', $subject);
 
@@ -154,6 +182,11 @@ class SubjectController extends Controller
                 'This subject is used in one or more curriculums and cannot be deleted. Remove it from those curriculums first.',
             );
         }
+
+        // Notify/log BEFORE the delete — subjectRecipients() and the
+        // activity log entry both need college_id/category/title,
+        // which are gone once the row is removed.
+        $this->notifications->subjectDeleted($subject, $request->user());
 
         $subject->delete();
 
@@ -296,6 +329,10 @@ class SubjectController extends Controller
         }
 
         fclose($handle);
+
+        if (! empty($created)) {
+            $this->notifications->subjectsImported($created, $user);
+        }
 
         $createdCount = count($created);
         $skippedCount = count($skipped);

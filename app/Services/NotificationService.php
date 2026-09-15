@@ -8,6 +8,7 @@ use App\Models\Notification;
 use App\Models\ScheduleAuditLog;
 use App\Models\AcademicTerm;
 use App\Models\Section;
+use App\Models\Subject;
 use App\Models\SectionSubject;
 use App\Models\FacultyLoadRequest;
 use App\Models\User;
@@ -75,6 +76,21 @@ class NotificationService
     public const TYPE_SUBJECTS_ADDED_BATCH = 'SUBJECTS_ADDED_BATCH';
 
     public const TYPE_SUBJECT_REMOVED = 'SUBJECT_REMOVED';
+
+    // A Subject was added to (or bulk-imported into) the Subject
+    // Library master list — distinct from TYPE_SUBJECT_ADDED above,
+    // which is about attaching an existing Subject to a Section's
+    // schedule. See subjectCreated()/subjectsImported().
+    public const TYPE_SUBJECT_CREATED = 'SUBJECT_CREATED_IN_LIBRARY';
+
+    public const TYPE_SUBJECTS_IMPORTED = 'SUBJECTS_IMPORTED';
+
+    // A Subject already in the Library was edited, or removed
+    // entirely — same "master list" scope as the two above, not a
+    // Section attachment/detachment. See subjectUpdated()/subjectDeleted().
+    public const TYPE_SUBJECT_UPDATED = 'SUBJECT_UPDATED_IN_LIBRARY';
+
+    public const TYPE_SUBJECT_DELETED = 'SUBJECT_DELETED_FROM_LIBRARY';
 
     public const TYPE_AUTO_SCHEDULE_COMPLETED = 'AUTO_SCHEDULE_COMPLETED';
 
@@ -296,6 +312,260 @@ class NotificationService
             $term,
             $actor,
         );
+    }
+
+    /**
+     * A new Subject was added to the Subject Library master list
+     * (SubjectController::store()) — NOT a Section attachment, see
+     * TYPE_SUBJECT_CREATED's docblock. Recipients are scope-aware via
+     * subjectRecipients(): a Major subject only concerns its own
+     * College (plus Admin/Registrar); a General Education/Minor
+     * subject is shared institution-wide, so every College's Dean/OIC
+     * (plus Assistant Dean) is notified too, since it now affects
+     * every department's own curriculum/scheduling options.
+     */
+    public function subjectCreated(Subject $subject, User $actor): void
+    {
+        $subject->loadMissing('college');
+        $collegeLabel = $subject->isSharedResource() ? $subject->category : ($subject->college?->name ?? $subject->category);
+
+        foreach ($this->subjectRecipients($subject, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_SUBJECT_CREATED,
+                priority: self::PRIORITY_INFO,
+                title: 'Subject Added',
+                message: "{$subject->subject_code} — {$subject->subject_title} ({$collegeLabel}) was added to the Subject Library by {$actor->full_name}.",
+                data: [
+                    'subject_id' => $subject->id,
+                    'subject_code' => $subject->subject_code,
+                    'subject_title' => $subject->subject_title,
+                    'category' => $subject->category,
+                    'college_id' => $subject->college_id,
+                ],
+            );
+        }
+
+        $this->activityLog->record(
+            ActivityLogService::SUBJECT_CREATED,
+            "{$subject->subject_code} — {$subject->subject_title} was added to the Subject Library by {$actor->full_name}.",
+            $subject,
+            $actor,
+        );
+    }
+
+    /**
+     * A batch of Subjects was bulk-imported into the Subject Library
+     * (SubjectController::import()). One summary notification per
+     * affected recipient (never one per row — see spec-style
+     * subjectsAddedBatch() for the same "don't flood the bell"
+     * reasoning) covering the whole file, with recipients being the
+     * UNION of subjectRecipients() across every Subject actually
+     * created — so importing a mixed CSV (some College-owned Major
+     * rows, some shared GenEd/Minor rows) correctly reaches everyone
+     * affected by any row in it, each getting exactly one
+     * notification regardless of how many rows concern them.
+     *
+     * @param  \Illuminate\Support\Collection<int, Subject>|array<int, Subject>  $created
+     */
+    public function subjectsImported(iterable $created, User $actor): void
+    {
+        $created = collect($created);
+        $count = $created->count();
+
+        if ($count < 1) {
+            // Nothing was actually created — mirrors
+            // subjectsAddedBatch()'s no-op guard.
+            return;
+        }
+
+        $hasSharedRow = $created->contains(fn (Subject $s) => $s->isSharedResource());
+        $collegeIds = $created->pluck('college_id')->filter()->unique()->values();
+
+        $recipients = $created
+            ->flatMap(fn (Subject $s) => $this->subjectRecipients($s, $actor))
+            ->unique('id')
+            ->values();
+
+        $message = $count === 1
+            ? "1 subject was imported into the Subject Library by {$actor->full_name}."
+            : "{$count} subjects were imported into the Subject Library by {$actor->full_name}.";
+
+        foreach ($recipients as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_SUBJECTS_IMPORTED,
+                priority: self::PRIORITY_INFO,
+                title: 'Subjects Imported',
+                message: $message,
+                data: [
+                    'subject_count' => $count,
+                    'subject_codes' => $created->pluck('subject_code')->all(),
+                    'includes_shared_category' => $hasSharedRow,
+                    'college_ids' => $collegeIds->all(),
+                ],
+            );
+        }
+
+        $this->activityLog->record(
+            ActivityLogService::SUBJECT_IMPORTED,
+            $message,
+            null,
+            $actor,
+        );
+    }
+
+    /**
+     * An existing Subject's definition was edited directly
+     * (SubjectController::update()). Same scope rule as
+     * subjectCreated(): a Major subject only concerns its own
+     * College; a General Education/Minor subject is shared, so every
+     * College's Dean/OIC (plus Assistant Dean) hears about it too —
+     * a change to a shared subject's units/hours/room type affects
+     * every department scheduling against it. Only call when
+     * $changes is non-empty (caller's job to diff, same contract as
+     * facultyUpdatedDirectly()).
+     *
+     * @param  list<array{field: string, old: mixed, new: mixed}>  $changes
+     */
+    public function subjectUpdated(Subject $subject, User $actor, array $changes): void
+    {
+        if (empty($changes)) {
+            return;
+        }
+
+        $fieldLabels = [
+            'subject_code' => 'Subject Code',
+            'subject_title' => 'Subject Title',
+            'category' => 'Category',
+            'college_id' => 'College',
+            'subject_type' => 'Subject Type',
+            'units' => 'Units',
+            'lecture_hours' => 'Lecture Hours',
+            'laboratory_hours' => 'Laboratory Hours',
+            'required_hours' => 'Required Hours',
+            'is_active' => 'Status',
+        ];
+
+        $summary = collect($changes)
+            ->pluck('field')
+            ->map(fn (string $field) => $fieldLabels[$field] ?? Str::headline($field))
+            ->implode(', ');
+
+        $message = "{$subject->subject_code}'s {$summary} ".(count($changes) === 1 ? 'has' : 'have')." been updated by {$actor->full_name}.";
+
+        foreach ($this->subjectRecipients($subject, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_SUBJECT_UPDATED,
+                priority: self::PRIORITY_INFO,
+                title: 'Subject Updated',
+                message: $message,
+                data: [
+                    'subject_id' => $subject->id,
+                    'subject_code' => $subject->subject_code,
+                    'changes' => $changes,
+                ],
+            );
+        }
+
+        $this->activityLog->record(
+            ActivityLogService::SUBJECT_UPDATED,
+            $message,
+            $subject,
+            $actor,
+        );
+    }
+
+    /**
+     * A Subject was deleted from the Library
+     * (SubjectController::destroy() — only reachable once it's
+     * confirmed unused in any Curriculum, see that method). Same
+     * subjectRecipients() scope rule as create/update/import. Pass
+     * the Subject BEFORE it's deleted so college_id/category are
+     * still available for scoping and for the audit row's
+     * `subject_type`/`subject_id` reference.
+     */
+    public function subjectDeleted(Subject $subject, User $actor): void
+    {
+        $message = "{$subject->subject_code} — {$subject->subject_title} was removed from the Subject Library by {$actor->full_name}.";
+
+        foreach ($this->subjectRecipients($subject, $actor) as $recipient) {
+            $this->writeNotification(
+                recipient: $recipient,
+                actor: $actor,
+                type: self::TYPE_SUBJECT_DELETED,
+                priority: self::PRIORITY_WARNING,
+                title: 'Subject Deleted',
+                message: $message,
+                data: [
+                    'subject_id' => $subject->id,
+                    'subject_code' => $subject->subject_code,
+                    'subject_title' => $subject->subject_title,
+                    'category' => $subject->category,
+                    'college_id' => $subject->college_id,
+                ],
+            );
+        }
+
+        $this->activityLog->record(
+            ActivityLogService::SUBJECT_DELETED,
+            $message,
+            $subject,
+            $actor,
+        );
+    }
+
+    /**
+     * SCOPE RULE for Subject Library events (create/import/update/
+     * delete), per
+     * spec: "notify by scope — a Dean/OIC's own College action
+     * reaches Admin/Registrar and that College's own OIC/Dean; a
+     * shared (General Education/Minor) subject reaches every
+     * department/College, since it's institution-wide, not owned by
+     * any one College."
+     *
+     *   - Major (College-owned): Admin + Registrar + Dean/OIC of that
+     *     one College only. A CTE Dean adding a Major subject never
+     *     reaches CCS's Dean/OIC.
+     *   - General Education / Minor (shared): Admin + Registrar +
+     *     EVERY College's Dean/OIC + Assistant Dean — the whole
+     *     institution, since every department can now use/schedule
+     *     against this subject.
+     *
+     * Actor always excluded (spec Section 10, same as every other
+     * resolver in this service), deduped by user id.
+     *
+     * @return Collection<int, User>
+     */
+    private function subjectRecipients(Subject $subject, User $actor): Collection
+    {
+        $admins = $this->adminRecipients();
+
+        if ($subject->isSharedResource()) {
+            $everyDeanOic = User::query()->role(AccessScope::COLLEGE_SCOPED_ROLES)->get();
+            $assistantDeans = User::query()->role(AccessScope::ASSISTANT_DEAN_ROLE)->get();
+
+            return $admins
+                ->concat($everyDeanOic)
+                ->concat($assistantDeans)
+                ->unique('id')
+                ->reject(fn (User $u) => $u->is($actor))
+                ->values();
+        }
+
+        $ownCollegeDeanOic = $subject->college_id
+            ? User::query()->role(AccessScope::COLLEGE_SCOPED_ROLES)->where('college_id', $subject->college_id)->get()
+            : collect();
+
+        return $admins
+            ->concat($ownCollegeDeanOic)
+            ->unique('id')
+            ->reject(fn (User $u) => $u->is($actor))
+            ->values();
     }
 
     /**
