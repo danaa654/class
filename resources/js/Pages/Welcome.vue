@@ -86,6 +86,19 @@ const onFeatureCardClick = (event, title) => {
     spawnRipple(event);
     toggleFlip(title);
 };
+
+// Hero-only firefly effect: amber in dark mode, green in light mode.
+// Randomized per page load so it doesn't feel like a fixed, repeating
+// pattern.
+const fireflies = Array.from({ length: 22 }, (_, i) => ({
+    id: i,
+    left: Math.random() * 100,
+    top: Math.random() * 100,
+    size: 2 + Math.random() * 3,
+    duration: 7 + Math.random() * 8,
+    delay: -Math.random() * 12,
+    drift: (Math.random() > 0.5 ? 1 : -1) * (20 + Math.random() * 40),
+}));
 </script>
 
 <template>
@@ -111,6 +124,25 @@ const onFeatureCardClick = (event, title) => {
                     <svg class="absolute right-6 top-28 h-24 w-24 text-white/25 lg:right-16" viewBox="0 0 60 60" fill="currentColor">
                         <circle v-for="n in 16" :key="n" :cx="(n % 4) * 16 + 4" :cy="Math.floor(n / 4) * 16 + 4" r="2" />
                     </svg>
+                </div>
+
+                <!-- Fireflies: amber in dark mode, green in light mode. Scoped to the hero only. -->
+                <div class="pointer-events-none absolute inset-0 z-[5] overflow-hidden">
+                    <span
+                        v-for="fly in fireflies"
+                        :key="'fly-' + fly.id"
+                        class="firefly"
+                        :class="{ 'firefly--green': !isDark }"
+                        :style="{
+                            left: fly.left + '%',
+                            top: fly.top + '%',
+                            width: fly.size + 'px',
+                            height: fly.size + 'px',
+                            animationDuration: fly.duration + 's',
+                            animationDelay: fly.delay + 's',
+                            '--drift': fly.drift + 'px',
+                        }"
+                    />
                 </div>
 
                 <!-- Navigation: liquid-glass floating pill -->

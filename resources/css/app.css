@@ -17,6 +17,18 @@
     --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
+/* Smooth scrolling for anchor nav (#about, #features) and any
+   programmatic scrollIntoView calls. */
+html {
+    scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html {
+        scroll-behavior: auto;
+    }
+}
+
 /* =========================================================================
    CLASSLY Typography System
    Centralized tokens for the entire application. Components should use
@@ -524,6 +536,12 @@ html.dark ::-webkit-scrollbar-thumb:hover {
     animation-timing-function: ease-in-out;
     animation-iteration-count: infinite;
     will-change: transform, opacity;
+}
+
+/* Light-mode variant used in the Welcome page hero: green instead of amber */
+.firefly--green {
+    background: radial-gradient(circle, rgba(198, 255, 197, 0.95) 0%, rgba(74, 222, 128, 0.55) 45%, transparent 75%);
+    box-shadow: 0 0 6px 2px rgba(74, 222, 128, 0.55);
 }
 
 @keyframes firefly-drift {
