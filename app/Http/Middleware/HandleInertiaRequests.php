@@ -167,6 +167,20 @@ class HandleInertiaRequests extends Middleware
             'unreadNotificationCount' => fn () => $user
                 ? Notification::query()->where('recipient_user_id', $user->id)->where('is_read', false)->count()
                 : 0,
+            // IN-SYSTEM MESSAGING — seeds the floating chat button's
+            // badge on first paint, before ChatWidget's first poll
+            // response lands (same pattern as the bell above).
+            'unreadChatCount' => fn () => $user
+                ? \App\Models\ChatMessage::query()
+                    ->join('conversation_participants', 'conversation_participants.conversation_id', '=', 'chat_messages.conversation_id')
+                    ->where('conversation_participants.user_id', $user->id)
+                    ->where('chat_messages.sender_id', '!=', $user->id)
+                    ->where(function ($query) {
+                        $query->whereNull('conversation_participants.last_read_at')
+                            ->orWhereColumn('chat_messages.created_at', '>', 'conversation_participants.last_read_at');
+                    })
+                    ->count()
+                : 0,
             // SCHOOL BRANDING — single source of truth for the school's
             // identity (Settings → General), shared on every page so the
             // Welcome/Login pages, Dashboard, and the main app

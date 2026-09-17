@@ -17,6 +17,7 @@ use App\Http\Controllers\FacultyScheduleEmailController;
 use App\Http\Controllers\FacultyLoadRequestController;
 use App\Http\Controllers\FacultyRequestController;
 use App\Http\Controllers\MajorController;
+use App\Http\Controllers\ChatController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\ReportsController;
 use App\Http\Controllers\RoomController;
@@ -277,6 +278,19 @@ Route::middleware('auth')->group(function () {
     Route::get('/notifications/{notification}/redirect', [NotificationController::class, 'redirect'])->name('notifications.redirect');
     Route::delete('/notifications/read-all', [NotificationController::class, 'destroyAllRead'])->name('notifications.destroy-all-read');
     Route::delete('/notifications/{notification}', [NotificationController::class, 'destroy'])->name('notifications.destroy');
+
+    // IN-SYSTEM MESSAGING (chatbox) — polling API behind the floating
+    // chat widget in AppLayout. Every endpoint re-checks participation
+    // server-side; route-model binding alone is not the boundary.
+    Route::get('/chat/contacts', [ChatController::class, 'contacts'])->name('chat.contacts');
+    Route::get('/chat/unread-count', [ChatController::class, 'unreadCount'])->name('chat.unread-count');
+    Route::get('/chat/with/{user}', [ChatController::class, 'open'])->name('chat.open');
+    Route::get('/chat/conversations/{conversation}/messages', [ChatController::class, 'messages'])->name('chat.messages');
+    Route::post('/chat/conversations/{conversation}/messages', [ChatController::class, 'store'])->name('chat.messages.store');
+    Route::patch('/chat/conversations/{conversation}/read', [ChatController::class, 'read'])->name('chat.read');
+    // Edit/unsend — sender-only, time-windowed (see ChatController).
+    Route::patch('/chat/messages/{message}', [ChatController::class, 'update'])->name('chat.messages.update');
+    Route::delete('/chat/messages/{message}', [ChatController::class, 'destroy'])->name('chat.messages.destroy');
 
     Route::get('/reports', [ReportsController::class, 'index'])->name('reports');
     // Server-rendered, branded printable version — opens in its own

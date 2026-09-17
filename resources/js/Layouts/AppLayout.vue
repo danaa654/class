@@ -3,6 +3,7 @@ import { Link, usePage } from '@inertiajs/vue3';
 import { ref, computed } from 'vue';
 import ThemeToggle from '@/Components/ThemeToggle.vue';
 import NotificationBell from '@/Components/NotificationBell.vue';
+import ChatWidget from '@/Components/ChatWidget.vue';
 import TermSwitcher from '@/Components/TermSwitcher.vue';
 import { useTheme } from '@/composables/useTheme';
 
@@ -321,7 +322,11 @@ const isActive = (routeName) => {
                 <slot :is-dark="isDark" />
             </div>
         </main>
-    </div>
+    
+        <!-- IN-SYSTEM MESSAGING — layout-level so the chatbox survives
+             page navigation instead of remounting per page. -->
+        <ChatWidget v-if="user" />
+</div>
 </template>
 
 <style scoped>
