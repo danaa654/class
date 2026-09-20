@@ -60,6 +60,15 @@ class AutoScheduleService
      * Generate schedules for every unscheduled Subject in the Section.
      * Returns a summary the frontend uses to render the review panel.
      *
+     * SUBJECT-SCOPE CHOICE — $subjectScope is the Dean/OIC/Registrar/
+     * Admin's own choice from the Auto Generate launcher: 'major_only'
+     * restricts this run to Major subjects, 'all' (the default) is the
+     * previous unrestricted behaviour (Major + GenEd/Minor). This is
+     * independent of, and layered on top of, the Assistant Dean's
+     * hard role restriction below — an Assistant Dean's requested
+     * scope is always ignored in favor of GenEd/Minor-only, since that
+     * restriction is a permission boundary, not a preference.
+     *
      * CONCURRENCY HARDENING (spec Section 15) — $expectedVersion is
      * the Section's schedule_version the frontend had loaded right
      * before clicking "Auto Generate". When supplied, it's checked
@@ -82,9 +91,39 @@ class AutoScheduleService
      * is unaffected — unscheduledRows() returns every unscheduled row
      * for them, exactly as before.
      *
+     * REMOVED-BY-USER SUBJECTS — $excludeSectionSubjectIds are rows the
+     * Registrar removed (the X on a card in the review panel) and does
+     * not want auto-scheduled. They're skipped exactly like rows that
+     * already have a schedule: not attempted, not written, not counted
+     * toward 'total'/'scheduled'.
+     *
+     * @param  int[]  $excludeSectionSubjectIds
      * @throws ScheduleVersionConflictException
      */
-    public function generate(Section $section, ?int $expectedVersion = null, ?User $user = null): array
+    public function generate(Section $section, ?int $expectedVersion = null, ?User $user = null, string $subjectScope = 'all', array $excludeSectionSubjectIds = [], array $excludedDays = []): array
+    {
+        // DAYS TO KEEP FREE (per run) — chosen in the Auto Generate
+        // modal. Set for the duration of this run only and ALWAYS
+        // cleared afterwards, so a later manual edit or another
+        // section's run never inherits them. See
+        // MeetingPatternService::allowedDays().
+        MeetingPatternService::setExcludedDays($excludedDays);
+
+        try {
+            $summary = $this->runGenerate($section, $expectedVersion, $user, $subjectScope, $excludeSectionSubjectIds);
+        } finally {
+            MeetingPatternService::setExcludedDays([]);
+        }
+
+        $summary['excluded_days'] = array_values(array_intersect(\App\Models\SchoolYear::ALL_DAYS, $excludedDays));
+
+        return $summary;
+    }
+
+    /**
+     * @param  int[]  $excludeSectionSubjectIds
+     */
+    private function runGenerate(Section $section, ?int $expectedVersion = null, ?User $user = null, string $subjectScope = 'all', array $excludeSectionSubjectIds = []): array
     {
         $section->loadMissing('major.department');
 
@@ -112,14 +151,40 @@ class AutoScheduleService
         // ScheduleVersionConflictException if the first run already
         // bumped the version — exactly the "please refresh" outcome
         // the frontend already handles today.
-        return DB::transaction(function () use ($section, $expectedVersion, $user) {
+        return DB::transaction(function () use ($section, $expectedVersion, $user, $subjectScope, $excludeSectionSubjectIds) {
             $lockedSection = $this->conflictService->lockResources(null, null, $section->id);
             $this->conflictService->checkSectionVersion($lockedSection, $expectedVersion);
 
-            $targets = $this->unscheduledRows($section, $user);
-            $skippedOutOfScope = AccessScope::isAssistantDean($user)
-                ? $this->outOfScopeRows($section)
-                : collect();
+            $targets = $this->unscheduledRows($section, $user, $subjectScope, $excludeSectionSubjectIds);
+
+            // How many rows the Registrar removed that are still sitting
+            // unscheduled — reported back so the review panel can say so.
+            $skippedByUser = $excludeSectionSubjectIds === []
+                ? 0
+                : $section->sectionSubjects()
+                    ->whereIn('id', $excludeSectionSubjectIds)
+                    ->whereNull('faculty_id')
+                    ->whereNull('room_id')
+                    ->whereNull('days')
+                    ->whereNull('start_time')
+                    ->whereNull('end_time')
+                    ->count();
+
+            // ROLE RESTRICTION — which category, if any, this user is
+            // hard-barred from touching for THIS Section (see
+            // AccessScope::isRestrictedToSharedCategoriesFor() /
+            // isRestrictedToMajorOnlyFor()). At most one of these is
+            // ever true for a given user+Section: a dual-role Dean who
+            // is also Assistant Dean is neither, for their own College.
+            $sectionCollegeId = $section->collegeId();
+            $isMinorRestricted = AccessScope::isRestrictedToSharedCategoriesFor($user, $sectionCollegeId);
+            $isMajorRestricted = ! $isMinorRestricted && AccessScope::isRestrictedToMajorOnlyFor($user, $sectionCollegeId);
+
+            $skippedOutOfScope = match (true) {
+                $isMinorRestricted => $this->outOfScopeRows($section, ['Major']),
+                $isMajorRestricted => $this->outOfScopeRows($section, ['General Education', 'Minor']),
+                default => collect(),
+            };
 
             if ($targets->isEmpty()) {
                 return [
@@ -128,12 +193,19 @@ class AutoScheduleService
                     'results' => [],
                     'unresolved' => [],
                     'skipped_out_of_scope' => $this->summarizeSkipped($skippedOutOfScope),
-                    'message' => $skippedOutOfScope->isEmpty()
-                        ? 'Every subject in this section already has a schedule assigned.'
-                        : 'No GenEd/Minor subjects need scheduling. '
+                    'skipped_by_user' => $skippedByUser,
+                    'message' => match (true) {
+                        $isMinorRestricted && $skippedOutOfScope->isNotEmpty() => 'No GenEd/Minor subjects need scheduling. '
                             .$skippedOutOfScope->count().' Major '
                             .($skippedOutOfScope->count() === 1 ? 'subject is' : 'subjects are')
                             .' left for the Dean/OIC to schedule.',
+                        $isMajorRestricted && $skippedOutOfScope->isNotEmpty() => 'No Major subjects need scheduling. '
+                            .$skippedOutOfScope->count().' GenEd/Minor '
+                            .($skippedOutOfScope->count() === 1 ? 'subject is' : 'subjects are')
+                            .' left for the Assistant Dean to schedule.',
+                        $subjectScope === 'major_only' => 'Every Major subject in this section already has a schedule assigned.',
+                        default => 'Every subject in this section already has a schedule assigned.',
+                    },
                 ];
             }
 
@@ -195,6 +267,12 @@ class AutoScheduleService
                     .' left for the Dean/OIC (outside your GenEd/Minor scheduling scope).';
             }
 
+            if ($skippedByUser > 0) {
+                $message .= ' '.$skippedByUser.' '
+                    .($skippedByUser === 1 ? 'subject' : 'subjects')
+                    .' you removed '.($skippedByUser === 1 ? 'was' : 'were').' skipped and left unscheduled.';
+            }
+
             // Advance the Section's schedule_version exactly once for
             // this run, but only when it actually wrote something — a run
             // that placed nothing (every candidate lost its race, or
@@ -215,6 +293,7 @@ class AutoScheduleService
                 'results' => $results,
                 'unresolved' => $unresolved,
                 'skipped_out_of_scope' => $this->summarizeSkipped($skippedOutOfScope),
+                'skipped_by_user' => $skippedByUser,
                 'message' => $message,
             ];
         });
@@ -268,12 +347,19 @@ class AutoScheduleService
 
             $query = $section->sectionSubjects()->where('is_auto_generated', true);
 
-            // Assistant Dean's "Regenerate" must never wipe out a
-            // Major subject's auto-generated schedule — that row is
-            // outside their scope to touch even to clear it, same as
-            // it's outside their scope to write in the first place.
-            if (AccessScope::isAssistantDean($user)) {
+            // Neither direction of the role restriction may wipe out a
+            // schedule that's outside its scope to write in the first
+            // place — an Assistant-Dean-restricted run must leave
+            // Major rows alone, and (new) a Major-only-restricted
+            // Dean/OIC must leave GenEd/Minor rows alone. Dual-role
+            // Dean-and-Assistant-Dean users are exempt for their OWN
+            // College either way — see isRestrictedToSharedCategoriesFor()
+            // / isRestrictedToMajorOnlyFor().
+            $sectionCollegeId = $section->collegeId();
+            if (AccessScope::isRestrictedToSharedCategoriesFor($user, $sectionCollegeId)) {
                 $query->whereHas('subject', fn ($q) => $q->whereIn('category', ['General Education', 'Minor']));
+            } elseif (AccessScope::isRestrictedToMajorOnlyFor($user, $sectionCollegeId)) {
+                $query->whereHas('subject', fn ($q) => $q->where('category', 'Major'));
             }
 
             $cleared = $query->update([
@@ -303,11 +389,87 @@ class AutoScheduleService
      * never manually-assigned ones), then runs generate() again from
      * a clean slate.
      */
-    public function regenerate(Section $section, ?User $user = null): array
+    public function regenerate(Section $section, ?User $user = null, string $subjectScope = 'all', array $excludeSectionSubjectIds = [], array $excludedDays = []): array
     {
         $this->clear($section, $user);
 
-        return $this->generate($section, null, $user);
+        return $this->generate($section, null, $user, $subjectScope, $excludeSectionSubjectIds, $excludedDays);
+    }
+
+    /**
+     * Remove ONE subject from a pending Auto Generate run — the X on a
+     * card in the review panel. Reverts just that row (plus its
+     * split-delivery sibling (Lecture/Laboratory component), which is
+     * always scheduled as a pair) back to an empty slot; the subject itself stays in the
+     * Section, ready to be scheduled by hand. Rows the Registrar
+     * assigned by hand (is_auto_generated = false) are never touched.
+     *
+     * @return array{cleared_ids: int[], reason: string|null}  reason is
+     *         null on success, otherwise one of 'not_auto_generated',
+     *         'out_of_scope', 'has_merged_dependents'.
+     *
+     * @throws \App\Exceptions\SectionFinalizedException
+     */
+    public function clearOne(Section $section, SectionSubject $row, ?User $user = null): array
+    {
+        return DB::transaction(function () use ($section, $row, $user) {
+            $lockedSection = $this->conflictService->lockResources(null, null, $section->id);
+
+            $target = $section->sectionSubjects()->whereKey($row->id)->with('subject')->lockForUpdate()->first();
+
+            if (! $target || ! $target->is_auto_generated) {
+                return ['cleared_ids' => [], 'reason' => 'not_auto_generated'];
+            }
+
+            // Same role boundary clear() enforces for the whole run.
+            $sectionCollegeId = $section->collegeId();
+            $category = $target->subject?->category;
+            if (AccessScope::isRestrictedToSharedCategoriesFor($user, $sectionCollegeId)
+                && ! in_array($category, ['General Education', 'Minor'], true)) {
+                return ['cleared_ids' => [], 'reason' => 'out_of_scope'];
+            }
+            if (AccessScope::isRestrictedToMajorOnlyFor($user, $sectionCollegeId) && $category !== 'Major') {
+                return ['cleared_ids' => [], 'reason' => 'out_of_scope'];
+            }
+
+            $ids = [$target->id];
+
+            if ($target->isSplitComponent()) {
+                $siblingIds = $section->sectionSubjects()
+                    ->where('subject_id', $target->subject_id)
+                    ->where('component', '!=', 'combined')
+                    ->where('is_auto_generated', true)
+                    ->pluck('id')
+                    ->all();
+
+                $ids = array_values(array_unique(array_merge($ids, $siblingIds)));
+            }
+
+            // Another (irregular) section's subject may be riding on this
+            // row's class — clearing it would leave that row pointing at
+            // an empty slot, so refuse instead of orphaning it.
+            if (SectionSubject::whereIn('merged_into_section_subject_id', $ids)->exists()) {
+                return ['cleared_ids' => [], 'reason' => 'has_merged_dependents'];
+            }
+
+            SectionSubject::whereIn('id', $ids)->update([
+                'faculty_id' => null,
+                'room_id' => null,
+                'days' => null,
+                'start_time' => null,
+                'end_time' => null,
+                'status' => 'Draft',
+                'is_auto_generated' => false,
+                'auto_generated_meta' => null,
+                'is_merged' => false,
+                'merged_into_section_subject_id' => null,
+                'merge_recommendation' => null,
+            ]);
+
+            $this->conflictService->bumpScheduleVersion($lockedSection);
+
+            return ['cleared_ids' => $ids, 'reason' => null];
+        });
     }
 
     /**
@@ -315,16 +477,25 @@ class AutoScheduleService
      * touched — this is the "don't overwrite manual assignments"
      * rule enforced at the query level, not just by convention.
      *
-     * SCOPE ENFORCEMENT — when $user is an Assistant Dean, Major
-     * subjects are excluded here entirely (reuses Subject's own
-     * 'General Education'/'Minor' category list — see
-     * AccessScope::isSharedCategory() / Subject::scopeManageableBy())
+     * SCOPE ENFORCEMENT (role, hard boundary) — when $user is an
+     * Assistant Dean, Major subjects are excluded here entirely
+     * (reuses Subject's own 'General Education'/'Minor' category list
+     * — see AccessScope::isSharedCategory() / Subject::scopeManageableBy())
      * so they're never handed to generateOne() at all. Every other
-     * role's query is unchanged.
+     * role's query is unrestricted by role.
+     *
+     * SUBJECT-SCOPE CHOICE (user preference, soft filter) —
+     * $subjectScope === 'major_only' additionally restricts the query
+     * to Major subjects only, regardless of role. This is checked
+     * AFTER the Assistant Dean role check above and can only narrow
+     * further, never widen: an Assistant Dean who somehow requested
+     * 'major_only' still gets nothing (their role query already
+     * excluded Major), rather than the two filters conflicting.
      */
-    private function unscheduledRows(Section $section, ?User $user = null)
+    private function unscheduledRows(Section $section, ?User $user = null, string $subjectScope = 'all', array $excludeSectionSubjectIds = [])
     {
         $query = $section->sectionSubjects()
+            ->when($excludeSectionSubjectIds !== [], fn ($q) => $q->whereNotIn('id', $excludeSectionSubjectIds))
             ->whereNull('faculty_id')
             ->whereNull('room_id')
             ->whereNull('days')
@@ -332,8 +503,10 @@ class AutoScheduleService
             ->whereNull('end_time')
             ->with('subject');
 
-        if (AccessScope::isAssistantDean($user)) {
+        if (AccessScope::isRestrictedToSharedCategoriesFor($user, $section->collegeId())) {
             $query->whereHas('subject', fn ($q) => $q->whereIn('category', ['General Education', 'Minor']));
+        } elseif (AccessScope::isRestrictedToMajorOnlyFor($user, $section->collegeId()) || $subjectScope === 'major_only') {
+            $query->whereHas('subject', fn ($q) => $q->where('category', 'Major'));
         }
 
         return $query->get()
@@ -342,11 +515,16 @@ class AutoScheduleService
     }
 
     /**
-     * The Major-subject unscheduled rows an Assistant Dean's run
-     * deliberately left alone — used only to build the
-     * 'skipped_out_of_scope' summary/message, never scheduled.
+     * The unscheduled rows a role-restricted run deliberately left
+     * alone — used only to build the 'skipped_out_of_scope'
+     * summary/message, never scheduled. $categories is the category
+     * list the ACTING user was excluded from: ['Minor', 'General
+     * Education'] for an Assistant-Dean-restricted run (the Dean/OIC
+     * owns those subjects' schedule), or ['Major'] for a
+     * Major-only-restricted Dean/OIC run (the Assistant Dean owns
+     * those instead).
      */
-    private function outOfScopeRows(Section $section)
+    private function outOfScopeRows(Section $section, array $categories)
     {
         return $section->sectionSubjects()
             ->whereNull('faculty_id')
@@ -355,7 +533,7 @@ class AutoScheduleService
             ->whereNull('start_time')
             ->whereNull('end_time')
             ->with('subject')
-            ->whereHas('subject', fn ($q) => $q->where('category', 'Major'))
+            ->whereHas('subject', fn ($q) => $q->whereIn('category', $categories))
             ->get()
             ->filter(fn (SectionSubject $row) => $row->subject !== null)
             ->values();
@@ -451,7 +629,12 @@ class AutoScheduleService
             if ($mergeOutcome['recommendation'] === 'merge' && $mergeOutcome['best_match']) {
                 $host = SectionSubject::find($mergeOutcome['best_match']['section_subject_id']);
 
-                if ($host) {
+                // A merged row copies its host's Days exactly, so skip the
+                // merge if that would land on a day the user asked to keep
+                // free for this run — fall through to the independent search.
+                $hostTouchesExcludedDay = ! empty(array_intersect(array_map('trim', explode(',', (string) ($host?->days ?? ''))), MeetingPatternService::excludedDays()));
+
+                if ($host && ! $hostTouchesExcludedDay) {
                     $this->mergeService->applyMerge($sectionSubject, $host, $mergeOutcome);
 
                     return $this->mergedResult($sectionSubject, $mergeOutcome);

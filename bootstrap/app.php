@@ -23,6 +23,14 @@ return Application::configure(basePath: dirname(__DIR__))
             // the middleware so it never redirects against itself.
             \App\Http\Middleware\EnsurePasswordIsCurrent::class,
         ]);
+
+        // PERFORMANCE — compress API payloads. Gzips JSON/text
+        // responses (recommendations, previews, report exports, etc.)
+        // above a minimum size for any client that accepts gzip. See
+        // App\Http\Middleware\CompressApiPayload for what it
+        // deliberately skips (Inertia page visits, already-compressed
+        // responses, tiny payloads).
+        $middleware->append(\App\Http\Middleware\CompressApiPayload::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         // Belt-and-suspenders alongside the Route::fallback() in web.php:

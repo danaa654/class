@@ -59,8 +59,20 @@ return [
             'prefix_indexes' => true,
             'strict' => true,
             'engine' => null,
+            // PERFORMANCE — connection pooling. PDO::ATTR_PERSISTENT
+            // keeps the underlying TCP/auth handshake to MySQL alive
+            // between requests (reused from PHP-FPM's process pool)
+            // instead of paying connect+auth cost on every request.
+            // Toggle with DB_PERSISTENT (default off, since persistent
+            // connections need care with transactions/locking under
+            // high concurrency — enable it once you've load-tested).
+            // For a "real" pool (bounded size, health-checked) in
+            // front of MySQL, put PgBouncer-style pooling — e.g.
+            // ProxySQL — between the app and MySQL instead; this
+            // setting alone is per-process reuse, not a shared pool.
             'options' => extension_loaded('pdo_mysql') ? array_filter([
                 (PHP_VERSION_ID >= 80500 ? Mysql::ATTR_SSL_CA : PDO::MYSQL_ATTR_SSL_CA) => env('MYSQL_ATTR_SSL_CA'),
+                PDO::ATTR_PERSISTENT => env('DB_PERSISTENT', false),
             ]) : [],
         ],
 

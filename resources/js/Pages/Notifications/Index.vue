@@ -134,6 +134,8 @@ async function deleteNotification(notification) {
                                 v-if="notification.actor?.profile_photo_url"
                                 :src="notification.actor.profile_photo_url"
                                 alt=""
+                                loading="lazy"
+                                decoding="async"
                                 class="h-6 w-6 shrink-0 rounded-full object-cover"
                             />
                             <span

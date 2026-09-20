@@ -169,9 +169,74 @@ class AccessScope
         return self::isAssistantDean($user) && $isShared;
     }
 
+    /**
+     * SECTION-LEVEL counterpart for the OTHER side of the same boundary:
+     * whether $user's Auto Generate run is hard-limited to Major
+     * subjects only — i.e. they are a Dean/OIC with NO GenEd/Minor
+     * authority over this Section's College. Symmetric to
+     * isRestrictedToSharedCategoriesFor() above:
+     *   - Plain Assistant Dean, Admin/Registrar: false (not a Dean/OIC
+     *     at all — the Major/GenEd/Minor choice for Admin/Registrar
+     *     stays a soft preference, not a hard rule).
+     *   - Plain Dean/OIC (no is_gened_assistant_dean flag, doesn't
+     *     hold the Assistant Dean role): true, always — Major only,
+     *     regardless of what $subjectScope preference they pass. Minor/
+     *     GenEd subjects for their sections are the Assistant Dean's
+     *     job to generate, not theirs.
+     *   - Dual-role Dean/OIC who IS also Assistant Dean (e.g. the CTE
+     *     Dean who is also the institution's Assistant Dean): false —
+     *     isRestrictedToSharedCategoriesFor() already grants them the
+     *     full Major + GenEd/Minor set for their OWN College, so they
+     *     are not Major-only restricted there.
+     */
+    public static function isRestrictedToMajorOnlyFor(?User $user, ?int $sectionCollegeId): bool
+    {
+        if (! self::isCollegeScoped($user)) {
+            return false;
+        }
+
+        // A dual-role user already gets the full set for their own
+        // College via isRestrictedToSharedCategoriesFor() returning
+        // false for it — so they are never Major-only restricted.
+        return ! self::isAssistantDean($user);
+    }
+
     public static function isSharedCategory(?string $category): bool
     {
         return in_array($category, ['General Education', 'Minor'], true);
+    }
+
+    /**
+     * SECTION-LEVEL version of the dual-role union in canManageByCategory()
+     * — used by AutoScheduleService, where the decision is "which subject
+     * CATEGORIES may this run touch in THIS section" rather than a
+     * per-subject check.
+     *
+     * A plain Assistant Dean (no College of their own) is restricted to
+     * GenEd/Minor everywhere, exactly as before. But a Dean/OIC who has
+     * ALSO been granted GenEd/Minor authority (is_gened_assistant_dean) —
+     * e.g. the CTE Dean who is also the institution's Assistant Dean —
+     * is only restricted when generating for SOMEONE ELSE'S College.
+     * For their OWN College's sections, Major is theirs by virtue of
+     * being that College's Dean/OIC, so the restriction must not apply:
+     * they get the full Major + GenEd/Minor set, same as any other Dean.
+     *
+     * $sectionCollegeId is the College that owns the Section being
+     * generated (Section->major->department->college_id), NOT the
+     * user's own college_id — those two only coincide for the user's
+     * own sections.
+     */
+    public static function isRestrictedToSharedCategoriesFor(?User $user, ?int $sectionCollegeId): bool
+    {
+        if (! self::isAssistantDean($user)) {
+            return false;
+        }
+
+        if (self::isCollegeScoped($user) && self::canAccessCollege($user, $sectionCollegeId)) {
+            return false;
+        }
+
+        return true;
     }
 
     /**

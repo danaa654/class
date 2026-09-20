@@ -4,6 +4,7 @@ import { ref, computed, watch } from 'vue';
 import { useToast } from 'primevue/usetoast';
 import Swal from 'sweetalert2';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import BackLink from '@/Components/BackLink.vue';
 import Card from 'primevue/card';
 import InputText from 'primevue/inputtext';
 import InputNumber from 'primevue/inputnumber';
@@ -703,9 +704,7 @@ const saveEditPlacement = async (placement, confirmedKeys = {}) => {
         <div class="max-w-6xl mx-auto w-full" :class="isDark ? 'dark-scope' : ''">
             <!-- Back link -->
             <div class="mb-4">
-                <Link :href="route('scheduling.faculty')" class="text-sm text-slate-500 hover:text-slate-700">
-                    <i class="pi pi-arrow-left mr-1"></i> Back to Faculty
-                </Link>
+                <BackLink :href="route('scheduling.faculty')" label="Back to Faculty" />
             </div>
 
             <!-- Page Title -->

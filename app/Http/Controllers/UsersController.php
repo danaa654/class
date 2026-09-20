@@ -6,6 +6,7 @@ use App\Models\College;
 use App\Models\Department;
 use App\Models\User;
 use App\Services\ActivityLogService;
+use App\Services\ImageOptimizationService;
 use App\Services\NotificationService;
 use App\Services\PasswordPolicyService;
 use Database\Seeders\RoleSeeder;
@@ -50,6 +51,7 @@ class UsersController extends Controller
         private readonly PasswordPolicyService $policy,
         private readonly ActivityLogService $activityLog = new ActivityLogService,
         private readonly NotificationService $notifications = new NotificationService,
+        private readonly ImageOptimizationService $imageOptimizer = new ImageOptimizationService,
     ) {}
 
     /**
@@ -61,9 +63,17 @@ class UsersController extends Controller
     {
         $this->authorizeAdministrator($request);
 
-        $users = User::with(['roles', 'college', 'department', 'departments'])
+        // PERFORMANCE — select only the columns Users/Index.vue's
+        // transform() actually reads, instead of every column
+        // (profile photo binary paths, timestamps, etc. this table
+        // never displays) for every one of potentially hundreds of users.
+        $users = User::with(['roles', 'college:id,name', 'department:id,name', 'departments:id,name'])
             ->orderByDesc('id')
-            ->get()
+            ->get([
+                'id', 'first_name', 'middle_name', 'last_name', 'suffix', 'name', 'email',
+                'status', 'college_id', 'department_id', 'must_change_password',
+                'is_gened_assistant_dean', 'profile_photo_path',
+            ])
             ->map(fn (User $user) => $this->transform($user));
 
         return Inertia::render('Users/Index', [
@@ -298,7 +308,12 @@ class UsersController extends Controller
             if ($user->profile_photo_path) {
                 Storage::disk('public')->delete($user->profile_photo_path);
             }
-            $user->profile_photo_path = $request->file('photo')->store('profile-photos', 'public');
+            // PERFORMANCE — compress images. Re-encodes/downsizes the
+            // upload before it's written to disk (see
+            // ImageOptimizationService) instead of storing whatever
+            // multi-MB original the browser sent, since this photo is
+            // then served on every page that shows the user's avatar.
+            $user->profile_photo_path = $this->imageOptimizer->storeOptimized($request->file('photo'), 'profile-photos');
         } elseif ($request->boolean('remove_photo') && $user->profile_photo_path) {
             Storage::disk('public')->delete($user->profile_photo_path);
             $user->profile_photo_path = null;

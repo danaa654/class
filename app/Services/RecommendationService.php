@@ -2058,7 +2058,7 @@ class RecommendationService
         // scoring every candidate slot stays cheap. See
         // sectionScheduleSnapshot() / scoreSectionDailyLoad().
         $sectionSnapshot = $section->id ? $this->sectionScheduleSnapshot($section->id, $excludingId) : [];
-        $allowedDays = $activeSchoolYear ? $activeSchoolYear->allowedDays() : SchoolYear::DEFAULT_CLASS_DAYS;
+        $allowedDays = $this->meetingPatternService->allowedDays();
 
         foreach ($dayPatterns as $days) {
             $sessionMinutes = (int) round(($totalHours / count($days)) * 60);
@@ -2208,7 +2208,7 @@ class RecommendationService
         $activeSchoolYear = SchoolYear::active();
         $candidateStartTimes = $activeSchoolYear ? $activeSchoolYear->candidateStartTimes() : (new SchoolYear)->candidateStartTimes();
         $classEndMinutes = $this->minutesFromTime($activeSchoolYear?->classEndTime() ?? SchoolYear::DEFAULT_CLASS_END_TIME);
-        $allowedDays = $activeSchoolYear ? $activeSchoolYear->allowedDays() : SchoolYear::DEFAULT_CLASS_DAYS;
+        $allowedDays = $this->meetingPatternService->allowedDays();
 
         $searchDays = array_values(array_diff($allowedDays, $excludeDays));
 

@@ -200,6 +200,8 @@ onUnmounted(() => {
                             v-if="notification.actor?.profile_photo_url"
                             :src="notification.actor.profile_photo_url"
                             alt=""
+                            loading="lazy"
+                            decoding="async"
                             class="h-9 w-9 shrink-0 rounded-full object-cover"
                         />
                         <span v-else-if="notification.actor" class="neu-icon-chip flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white">

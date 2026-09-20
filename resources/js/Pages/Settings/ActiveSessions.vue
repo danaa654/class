@@ -1,6 +1,7 @@
 <script setup>
 import { Head, Link, router, useForm } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import BackLink from '@/Components/BackLink.vue';
 import Card from 'primevue/card';
 import Button from 'primevue/button';
 import Tag from 'primevue/tag';
@@ -43,7 +44,7 @@ function refresh() {
                 </div>
                 <div class="flex items-center gap-2 shrink-0">
                     <Button icon="pi pi-refresh" label="Refresh" text @click="refresh" />
-                    <Link :href="route('settings')" class="text-sm text-[#2563EB] underline">Back to Settings</Link>
+                    <BackLink :href="route('settings')" label="Back to Settings" />
                 </div>
             </div>
 

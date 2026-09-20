@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\FacultyLoadRequest;
 use App\Models\SchoolYear;
+use App\Services\ImageOptimizationService;
 use App\Services\PasswordPolicyService;
 use App\Services\SettingsService;
 use App\Support\AccessScope;
@@ -44,6 +45,7 @@ class SettingsController extends Controller
     public function __construct(
         private readonly SettingsService $settings,
         private readonly PasswordPolicyService $passwordPolicy,
+        private readonly ImageOptimizationService $imageOptimizer = new ImageOptimizationService,
     ) {}
 
     /**
@@ -185,7 +187,11 @@ class SettingsController extends Controller
         ];
 
         if ($request->hasFile('logo')) {
-            $path = $request->file('logo')->store('school-logo', 'public');
+            // PERFORMANCE — compress images (see ImageOptimizationService).
+            // The logo is rendered on nearly every page's header, so an
+            // uncompressed multi-MB upload here is one of the more
+            // impactful assets to shrink.
+            $path = $this->imageOptimizer->storeOptimized($request->file('logo'), 'school-logo');
             $values['general.school_logo_path'] = Storage::url($path);
         }
 

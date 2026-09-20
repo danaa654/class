@@ -4,6 +4,7 @@ import { ref, computed, watch } from 'vue';
 import Swal from 'sweetalert2';
 import { useToast } from 'primevue/usetoast';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import BackLink from '@/Components/BackLink.vue';
 import Card from 'primevue/card';
 import Toolbar from 'primevue/toolbar';
 import InputText from 'primevue/inputtext';
@@ -254,13 +255,7 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                             Manage the subjects that make up this curriculum, arranged by Year Level and Semester.
                         </p>
                     </div>
-                    <Button
-                        label="Back to Curriculums"
-                        icon="pi pi-arrow-left"
-                        text
-                        severity="secondary"
-                        @click="router.visit(route('curriculums'))"
-                    />
+                    <BackLink :href="route('curriculums')" label="Back to Curriculums" />
                 </div>
             </div>
 

@@ -1,6 +1,6 @@
 <script setup>
 import { Head, router, usePage } from '@inertiajs/vue3';
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useToast } from 'primevue/usetoast';
 import AppLayout from '@/Layouts/AppLayout.vue';
 import Select from 'primevue/select';
@@ -674,20 +674,64 @@ const activeFiltersLabel = computed(() => {
     return parts.join(' · ');
 });
 
-// Dashboard Summary tiles — icon + accent per metric, same neu-icon-well
-// pattern used on the Scheduling Dashboard's stat cards.
+// Dashboard Summary tiles. Each tile has its own gradient accent
+// (`from` -> `to`); the last one ("Scheduling Completion") is the "hero"
+// tile: filled gradient with a progress meter.
 const summaryCards = computed(() => [
-    { label: 'Programs', value: props.summary.total_programs, icon: 'pi-sitemap', color: isDark.value ? '#5B9CFF' : '#2563EB', glow: isDark.value ? 'rgba(91, 156, 255, 0.3)' : 'rgba(37, 99, 235, 0.25)' },
-    { label: 'Sections', value: props.summary.total_sections, icon: 'pi-th-large', color: isDark.value ? '#5B9CFF' : '#2563EB', glow: isDark.value ? 'rgba(91, 156, 255, 0.3)' : 'rgba(37, 99, 235, 0.25)' },
-    { label: 'Regular', value: props.summary.regular_sections, icon: 'pi-check-circle', color: isDark.value ? '#34D399' : '#059669', glow: isDark.value ? 'rgba(52, 211, 153, 0.3)' : 'rgba(5, 150, 105, 0.25)' },
-    { label: 'Irregular', value: props.summary.irregular_sections, icon: 'pi-exclamation-circle', color: isDark.value ? '#FBBF24' : '#D97706', glow: isDark.value ? 'rgba(251, 191, 36, 0.3)' : 'rgba(217, 119, 6, 0.25)' },
-    { label: 'Subjects', value: props.summary.total_subjects, icon: 'pi-book', color: isDark.value ? '#C4B5FD' : '#7C3AED', glow: isDark.value ? 'rgba(196, 181, 253, 0.3)' : 'rgba(124, 58, 237, 0.25)' },
-    { label: 'Scheduled', value: props.summary.scheduled_subjects, icon: 'pi-calendar-plus', color: isDark.value ? '#34D399' : '#059669', glow: isDark.value ? 'rgba(52, 211, 153, 0.3)' : 'rgba(5, 150, 105, 0.25)' },
-    { label: 'Unscheduled', value: props.summary.unscheduled_subjects, icon: 'pi-calendar-times', color: isDark.value ? '#FCA5A5' : '#DC2626', glow: isDark.value ? 'rgba(252, 165, 165, 0.3)' : 'rgba(220, 38, 38, 0.2)' },
-    { label: 'Faculty', value: props.summary.total_faculty, icon: 'pi-users', color: isDark.value ? '#C4B5FD' : '#7C3AED', glow: isDark.value ? 'rgba(196, 181, 253, 0.3)' : 'rgba(124, 58, 237, 0.25)' },
-    { label: 'Rooms', value: props.summary.total_rooms, icon: 'pi-building', color: isDark.value ? '#C4B5FD' : '#7C3AED', glow: isDark.value ? 'rgba(196, 181, 253, 0.3)' : 'rgba(124, 58, 237, 0.25)' },
-    { label: 'Scheduling Completion', value: `${props.summary.completion_percent}%`, icon: 'pi-percentage', color: isDark.value ? '#34D399' : '#059669', glow: isDark.value ? 'rgba(52, 211, 153, 0.3)' : 'rgba(5, 150, 105, 0.25)' },
+    { label: 'Programs', target: props.summary.total_programs, icon: 'pi-sitemap', from: '#2563EB', to: '#6366F1' },
+    { label: 'Sections', target: props.summary.total_sections, icon: 'pi-th-large', from: '#0EA5E9', to: '#2563EB' },
+    { label: 'Regular', target: props.summary.regular_sections, icon: 'pi-check-circle', from: '#10B981', to: '#059669' },
+    { label: 'Irregular', target: props.summary.irregular_sections, icon: 'pi-exclamation-circle', from: '#F59E0B', to: '#EA580C' },
+    { label: 'Subjects', target: props.summary.total_subjects, icon: 'pi-book', from: '#A78BFA', to: '#7C3AED' },
+    { label: 'Scheduled', target: props.summary.scheduled_subjects, icon: 'pi-calendar-plus', from: '#14B8A6', to: '#059669' },
+    { label: 'Unscheduled', target: props.summary.unscheduled_subjects, icon: 'pi-calendar-times', from: '#FB7185', to: '#DC2626' },
+    { label: 'Faculty', target: props.summary.total_faculty, icon: 'pi-users', from: '#8B5CF6', to: '#D946EF' },
+    { label: 'Rooms', target: props.summary.total_rooms, icon: 'pi-building', from: '#6366F1', to: '#8B5CF6' },
+    {
+        label: 'Scheduling Completion',
+        target: Number(props.summary.completion_percent) || 0,
+        suffix: '%',
+        icon: 'pi-percentage',
+        from: '#059669',
+        to: '#0EA5E9',
+        hero: true,
+    },
 ]);
+
+// Count-up animation for the tile numbers (skipped when the visitor
+// prefers reduced motion). Re-runs whenever the summary changes.
+const animatedValues = ref({});
+let countRaf = null;
+
+const animateSummaryCounts = () => {
+    const targets = Object.fromEntries(summaryCards.value.map((card) => [card.label, Number(card.target) || 0]));
+
+    if (typeof window === 'undefined' || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        animatedValues.value = targets;
+        return;
+    }
+
+    cancelAnimationFrame(countRaf);
+    const startedAt = performance.now();
+    const duration = 800;
+
+    const tick = (now) => {
+        const t = Math.min(1, (now - startedAt) / duration);
+        const eased = 1 - Math.pow(1 - t, 3);
+        animatedValues.value = Object.fromEntries(
+            Object.entries(targets).map(([label, value]) => [label, Math.round(value * eased)]),
+        );
+        if (t < 1) countRaf = requestAnimationFrame(tick);
+    };
+
+    countRaf = requestAnimationFrame(tick);
+};
+
+const tileValue = (card) => `${animatedValues.value[card.label] ?? 0}${card.suffix ?? ''}`;
+
+onMounted(animateSummaryCounts);
+watch(() => props.summary, animateSummaryCounts, { deep: true });
+onBeforeUnmount(() => cancelAnimationFrame(countRaf));
 </script>
 
 <template>
@@ -830,15 +874,22 @@ const summaryCards = computed(() => [
 
             <!-- Dashboard Summary -->
             <div class="mt-6 grid grid-cols-2 gap-4 no-print md:grid-cols-5">
-                <div v-for="card in summaryCards" :key="card.label" class="neu-card rounded-2xl p-4 transition-colors duration-300">
-                    <span
-                        class="neu-icon-well neu-glow flex h-10 w-10 items-center justify-center rounded-xl"
-                        :style="{ '--neu-glow-color': card.glow }"
-                    >
-                        <i class="pi text-base" :class="[card.icon]" :style="{ color: card.color }"></i>
+                <div
+                    v-for="(card, index) in summaryCards"
+                    :key="card.label"
+                    class="stat-tile"
+                    :class="{ 'stat-tile--hero': card.hero }"
+                    :style="{ '--tile-a': card.from, '--tile-b': card.to, '--i': index }"
+                >
+                    <i class="pi stat-tile__ghost" :class="card.icon" aria-hidden="true"></i>
+                    <span class="stat-tile__icon">
+                        <i class="pi" :class="card.icon"></i>
                     </span>
-                    <p class="mt-3 text-xl font-bold" :class="isDark ? 'text-white' : 'text-[#1E293B]'">{{ card.value }}</p>
-                    <p class="mt-1 text-xs font-semibold uppercase tracking-wide" :class="isDark ? 'text-slate-400' : 'text-slate-400'">{{ card.label }}</p>
+                    <p class="stat-tile__value">{{ tileValue(card) }}</p>
+                    <p class="stat-tile__label">{{ card.label }}</p>
+                    <div v-if="card.hero" class="stat-tile__meter" aria-hidden="true">
+                        <span :style="{ width: Math.min(100, Math.max(0, card.target)) + '%' }"></span>
+                    </div>
                 </div>
             </div>
 
@@ -1141,5 +1192,176 @@ const summaryCards = computed(() => [
         box-shadow: none !important;
         border: none !important;
     }
+}
+</style>
+
+<style scoped>
+/* ------------------------------------------------------------------ */
+/* Dashboard summary tiles                                             */
+/* ------------------------------------------------------------------ */
+.stat-tile {
+    --tile-a: #2563EB;
+    --tile-b: #6366F1;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    padding: 1rem 1.1rem 1.05rem;
+    border-radius: 1.15rem;
+    border: 1px solid color-mix(in srgb, var(--tile-a) 18%, #E2E8F0);
+    background: linear-gradient(160deg, #FFFFFF 52%, color-mix(in srgb, var(--tile-a) 10%, #FFFFFF));
+    box-shadow:
+        0 1px 2px rgba(15, 23, 42, 0.05),
+        0 12px 26px -16px color-mix(in srgb, var(--tile-a) 55%, transparent);
+    transition: transform 0.28s cubic-bezier(0.2, 0.9, 0.3, 1.3), box-shadow 0.28s ease, border-color 0.28s ease;
+    /* "backwards" (not "both"): the end keyframe must not keep
+       overriding the hover transform once the entrance finishes. */
+    animation: tileIn 0.5s cubic-bezier(0.2, 0.9, 0.3, 1) backwards;
+    animation-delay: calc(var(--i) * 45ms);
+}
+.dark .stat-tile {
+    border-color: color-mix(in srgb, var(--tile-a) 30%, #263249);
+    background: linear-gradient(160deg, #111827 50%, color-mix(in srgb, var(--tile-a) 20%, #111827));
+    box-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.4),
+        0 14px 30px -18px color-mix(in srgb, var(--tile-a) 70%, transparent);
+}
+
+/* accent bar along the top edge — grows on hover */
+.stat-tile::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 1rem;
+    width: calc(100% - 2rem);
+    height: 3px;
+    border-radius: 0 0 6px 6px;
+    background: linear-gradient(90deg, var(--tile-a), var(--tile-b));
+    transform: scaleX(0.3);
+    transform-origin: left;
+    transition: transform 0.45s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+/* big faded icon in the corner */
+.stat-tile__ghost {
+    position: absolute;
+    right: -0.35rem;
+    bottom: -0.7rem;
+    font-size: 4.8rem;
+    color: var(--tile-a);
+    opacity: 0.08;
+    transform: rotate(-12deg);
+    transition: transform 0.4s ease, opacity 0.4s ease;
+    pointer-events: none;
+}
+
+.stat-tile__icon {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.6rem;
+    height: 2.6rem;
+    border-radius: 0.85rem;
+    color: #FFFFFF;
+    font-size: 1.05rem;
+    background: linear-gradient(135deg, var(--tile-a), var(--tile-b));
+    box-shadow:
+        0 8px 16px -6px color-mix(in srgb, var(--tile-a) 70%, transparent),
+        inset 0 1px 0 rgba(255, 255, 255, 0.4);
+    transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.5);
+}
+
+.stat-tile__value {
+    position: relative;
+    margin-top: 0.85rem;
+    font-size: 1.85rem;
+    line-height: 1.1;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    color: #0F172A;
+}
+.dark .stat-tile__value { color: #FFFFFF; }
+
+.stat-tile__label {
+    position: relative;
+    margin-top: 0.3rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: #64748B;
+}
+.dark .stat-tile__label { color: #94A3B8; }
+
+.stat-tile:hover {
+    transform: translateY(-4px);
+    border-color: color-mix(in srgb, var(--tile-a) 45%, #E2E8F0);
+    box-shadow:
+        0 2px 4px rgba(15, 23, 42, 0.06),
+        0 20px 36px -14px color-mix(in srgb, var(--tile-a) 65%, transparent);
+}
+.dark .stat-tile:hover {
+    border-color: color-mix(in srgb, var(--tile-a) 60%, #263249);
+}
+.stat-tile:hover::before { transform: scaleX(1); }
+.stat-tile:hover .stat-tile__icon { transform: rotate(-8deg) scale(1.1); }
+.stat-tile:hover .stat-tile__ghost { transform: rotate(-4deg) scale(1.18); opacity: 0.14; }
+
+/* hero tile (Scheduling Completion) — filled gradient + progress meter */
+.stat-tile--hero {
+    border-color: transparent;
+    background: linear-gradient(135deg, var(--tile-a), var(--tile-b));
+    box-shadow: 0 16px 32px -14px color-mix(in srgb, var(--tile-a) 80%, transparent);
+}
+.dark .stat-tile--hero {
+    border-color: transparent;
+    background: linear-gradient(135deg, var(--tile-a), var(--tile-b));
+}
+.stat-tile--hero::before { display: none; }
+.stat-tile--hero .stat-tile__ghost { color: #FFFFFF; opacity: 0.16; }
+.stat-tile--hero .stat-tile__icon {
+    background: rgba(255, 255, 255, 0.22);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+    backdrop-filter: blur(4px);
+}
+.stat-tile--hero .stat-tile__value,
+.dark .stat-tile--hero .stat-tile__value { color: #FFFFFF; }
+.stat-tile--hero .stat-tile__label,
+.dark .stat-tile--hero .stat-tile__label { color: rgba(255, 255, 255, 0.88); }
+.stat-tile--hero:hover {
+    border-color: transparent;
+    box-shadow: 0 24px 40px -14px color-mix(in srgb, var(--tile-a) 90%, transparent);
+}
+.stat-tile__meter {
+    position: relative;
+    margin-top: 0.8rem;
+    height: 6px;
+    border-radius: 9999px;
+    background: rgba(255, 255, 255, 0.28);
+    overflow: hidden;
+}
+.stat-tile__meter > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: #FFFFFF;
+    box-shadow: 0 0 10px rgba(255, 255, 255, 0.7);
+    transition: width 1s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+@keyframes tileIn {
+    from { opacity: 0; transform: translateY(12px) scale(0.97); }
+    to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .stat-tile,
+    .stat-tile::before,
+    .stat-tile__icon,
+    .stat-tile__ghost,
+    .stat-tile__meter > span { animation: none !important; transition: none !important; }
+    .stat-tile:hover { transform: none; }
 }
 </style>

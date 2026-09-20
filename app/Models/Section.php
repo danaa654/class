@@ -144,6 +144,24 @@ class Section extends Model
     }
 
     /**
+     * The College that owns this Section, via major->department. Used
+     * wherever a dual-role Dean/Assistant-Dean user's "is this MY
+     * College" check needs the Section's owner rather than the
+     * user's own college_id — see
+     * AccessScope::isRestrictedToSharedCategoriesFor(). Loads
+     * 'major.department' on demand if not already eager-loaded, so
+     * this is safe to call standalone.
+     */
+    public function collegeId(): ?int
+    {
+        if (! $this->relationLoaded('major') || ! $this->major?->relationLoaded('department')) {
+            $this->loadMissing('major.department');
+        }
+
+        return $this->major?->department?->college_id;
+    }
+
+    /**
      * The Curriculum this Section follows. Must belong to the same
      * Major (enforced in StoreSectionRequest/UpdateSectionRequest).
      *

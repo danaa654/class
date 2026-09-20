@@ -464,6 +464,18 @@ class FacultyController extends Controller
             'value' => ['required', 'integer', 'min:0', "max:{$cap}"],
         ]);
 
+        // Never lower the ceiling below the load already scheduled.
+        $currentLoad = $this->workloadService->currentLoad($faculty);
+        $existingMax = $usesHours ? (int) $faculty->max_weekly_hours : (int) $faculty->max_teaching_units;
+
+        if ($data['value'] < $existingMax && $data['value'] < $currentLoad) {
+            $unit = $usesHours ? 'hour(s)' : 'unit(s)';
+
+            return back()->withErrors([
+                'value' => "This faculty member already has {$currentLoad} {$unit} of scheduled subjects. The maximum cannot be set below {$currentLoad}.",
+            ]);
+        }
+
         $oldMaxTeachingUnits = $faculty->max_teaching_units;
 
         if ($usesHours) {

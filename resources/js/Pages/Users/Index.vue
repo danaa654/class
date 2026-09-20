@@ -550,6 +550,12 @@ const onUpdateAccount = () => {
                                 </Toolbar>
 
                                 <!-- Users Table -->
+                                <!-- PERFORMANCE — paginate large lists. This
+                                     table previously rendered every user row
+                                     into the DOM at once; :paginator below
+                                     caps rendering to one page at a time
+                                     (client-side, since filtering here is
+                                     already client-side via globalFilterFields). -->
                                 <DataTable
                                     :value="users"
                                     class="neu-inset neu-table rounded-xl overflow-hidden"
@@ -558,6 +564,9 @@ const onUpdateAccount = () => {
                                     responsiveLayout="scroll"
                                     :globalFilterFields="['fullName', 'email']"
                                     :filters="{ global: { value: search, matchMode: 'contains' } }"
+                                    paginator
+                                    :rows="20"
+                                    :rowsPerPageOptions="[10, 20, 50, 100]"
                                 >
                                     <template #empty>
                                         <div class="text-center py-10">
@@ -630,7 +639,7 @@ const onUpdateAccount = () => {
                                 <form class="pt-1 neu-form" autocomplete="off" @submit.prevent="onUpdateAccount">
                                     <div class="flex items-center gap-4 mb-6">
                                         <div class="relative shrink-0">
-                                            <img v-if="accountAvatarUrl" :src="accountAvatarUrl" class="h-16 w-16 rounded-full object-cover border border-slate-200" alt="Profile photo" />
+                                            <img v-if="accountAvatarUrl" :src="accountAvatarUrl" loading="lazy" decoding="async" class="h-16 w-16 rounded-full object-cover border border-slate-200" alt="Profile photo" />
                                             <span v-else class="flex h-16 w-16 items-center justify-center rounded-full bg-slate-200 text-lg font-bold text-slate-600">{{ accountInitials }}</span>
                                         </div>
                                         <div>

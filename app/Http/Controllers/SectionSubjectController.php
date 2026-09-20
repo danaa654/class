@@ -794,8 +794,8 @@ class SectionSubjectController extends Controller implements HasMiddleware
         // Major subjects for them (AutoScheduleService::unscheduledRows()).
         // This closes that gap at the one shared write path rather
         // than duplicating the check in both callers.
-        $subject->loadMissing('subject');
-        if (AccessScope::isAssistantDean($request->user()) && $subject->subject && ! $subject->subject->isSharedResource()) {
+        $subject->loadMissing('subject', 'section');
+        if (AccessScope::isRestrictedToSharedCategoriesFor($request->user(), $subject->section?->collegeId()) && $subject->subject && ! $subject->subject->isSharedResource()) {
             abort(403, "{$subject->subject->subject_code} is a Major subject — outside your Assistant Dean scheduling scope (GenEd/Minor only). The Dean/OIC manages this subject's schedule.");
         }
 
@@ -2071,7 +2071,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 // manual-drag counterpart to Auto Generate's
                 // unscheduledRows() category filter — same rule,
                 // enforced on both the automated and manual write paths.
-                $outOfCategory = AccessScope::isAssistantDean($user)
+                $outOfCategory = AccessScope::isRestrictedToSharedCategoriesFor($user, $assignment->section?->collegeId())
                     && $assignment->subject
                     && ! $assignment->subject->isSharedResource();
 
@@ -2543,6 +2543,32 @@ class SectionSubjectController extends Controller implements HasMiddleware
     }
 
     /**
+     * DAYS TO KEEP FREE — the optional `excluded_days` the Auto Generate
+     * modal sends (e.g. ['Fri'] so this section has no Friday classes and
+     * the Registrar can place its online subjects there by hand).
+     *
+     * Only days the active School Year actually schedules on are kept;
+     * anything else is ignored. Returns null when the selection would
+     * leave NO class day at all, so the caller can reject the request
+     * instead of running a generate that could never place anything.
+     *
+     * @return list<string>|null
+     */
+    private function requestedExcludedDays(Request $request): ?array
+    {
+        $requested = collect($request->input('excluded_days', []))
+            ->filter(fn ($day) => is_string($day))
+            ->unique()
+            ->values()
+            ->all();
+
+        $classDays = app(\App\Services\MeetingPatternService::class)->allowedDays();
+        $excluded = array_values(array_intersect($classDays, $requested));
+
+        return count($excluded) >= count($classDays) ? null : $excluded;
+    }
+
+    /**
      * ⚡ Auto Generate Schedule (Prompt 8.9).
      *
      * Runs AutoScheduleService for every currently unscheduled subject
@@ -2561,6 +2587,24 @@ class SectionSubjectController extends Controller implements HasMiddleware
      */
     public function autoGenerate(Request $request, Section $section): JsonResponse
     {
+        // SUBJECT-SCOPE CHOICE — 'all' (default) or 'major_only', the
+        // Dean/OIC/Registrar/Admin's choice from the Auto Generate
+        // launcher (see AutoScheduleService::generate()'s docblock for
+        // how this interacts with the Assistant Dean's role scope).
+        $subjectScope = $request->input('subject_scope', 'all');
+        if (! in_array($subjectScope, ['all', 'major_only'], true)) {
+            $subjectScope = 'all';
+        }
+
+        // DAYS TO KEEP FREE (optional) — chosen in the Auto Generate modal.
+        $excludedDays = $this->requestedExcludedDays($request);
+        if ($excludedDays === null) {
+            return response()->json([
+                'message' => 'At least one class day has to stay available for Auto Generate.',
+                'code' => 'NO_CLASS_DAYS_LEFT',
+            ], 422);
+        }
+
         // CONCURRENCY HARDENING (spec Section 15) — optional
         // `expected_schedule_version`: the Section's schedule_version
         // the frontend had loaded right before clicking "Auto
@@ -2570,7 +2614,10 @@ class SectionSubjectController extends Controller implements HasMiddleware
             $summary = $this->autoScheduleService->generate(
                 $section,
                 $request->filled('expected_schedule_version') ? (int) $request->input('expected_schedule_version') : null,
-                $request->user()
+                $request->user(),
+                $subjectScope,
+                [],
+                $excludedDays
             );
         } catch (ScheduleVersionConflictException $conflict) {
             $sameActor = $conflict->updatedBy !== null && $conflict->updatedBy === $request->user()?->id;
@@ -2626,7 +2673,29 @@ class SectionSubjectController extends Controller implements HasMiddleware
      */
     public function regenerateSchedule(Request $request, Section $section): JsonResponse
     {
-        $summary = $this->autoScheduleService->regenerate($section, $request->user());
+        $subjectScope = $request->input('subject_scope', 'all');
+        if (! in_array($subjectScope, ['all', 'major_only'], true)) {
+            $subjectScope = 'all';
+        }
+
+        // Subjects the Registrar removed (X) from the review panel — the
+        // regenerated run skips them instead of scheduling them again.
+        $excludeIds = collect($request->input('exclude_section_subject_ids', []))
+            ->filter(fn ($id) => is_numeric($id))
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        $excludedDays = $this->requestedExcludedDays($request);
+        if ($excludedDays === null) {
+            return response()->json([
+                'message' => 'At least one class day has to stay available for Auto Generate.',
+                'code' => 'NO_CLASS_DAYS_LEFT',
+            ], 422);
+        }
+
+        $summary = $this->autoScheduleService->regenerate($section, $request->user(), $subjectScope, $excludeIds, $excludedDays);
 
         // SCHEDULING NOTIFICATION SYSTEM (audit spec Section 5) — same
         // reasoning as autoGenerate() above. A regenerate that
@@ -2665,6 +2734,46 @@ class SectionSubjectController extends Controller implements HasMiddleware
             'message' => $cleared > 0
                 ? "{$cleared} auto-generated ".($cleared === 1 ? 'schedule was' : 'schedules were')." cleared."
                 : 'No auto-generated schedules to clear.',
+            'sectionSubjects' => $section->sectionSubjects()->with(['subject.recommendedRooms:id', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
+            'schedule_version' => $section->fresh()->schedule_version,
+        ]);
+    }
+
+    /**
+     * "X" on one card of the Auto Schedule review panel — removes just
+     * that subject from the generated schedule (see
+     * AutoScheduleService::clearOne()). The subject stays in the section,
+     * unscheduled, so it can be scheduled by hand.
+     */
+    public function clearAutoGeneratedOne(Request $request, Section $section, SectionSubject $subject): JsonResponse
+    {
+        abort_unless((int) $subject->section_id === (int) $section->id, 404);
+
+        try {
+            $outcome = $this->autoScheduleService->clearOne($section, $subject, $request->user());
+        } catch (SectionFinalizedException $finalized) {
+            return response()->json([
+                'message' => "This section's schedule is finalized and can't be changed.",
+                'code' => 'SECTION_FINALIZED',
+            ], 423);
+        }
+
+        if ($outcome['reason'] !== null) {
+            $messages = [
+                'not_auto_generated' => 'This subject is no longer part of the auto-generated schedule.',
+                'out_of_scope' => "You don't have permission to change this subject's schedule.",
+                'has_merged_dependents' => "Another section's class is merged into this subject's schedule, so it can't be removed here.",
+            ];
+
+            return response()->json([
+                'message' => $messages[$outcome['reason']] ?? 'Could not remove this subject.',
+                'code' => strtoupper($outcome['reason']),
+            ], $outcome['reason'] === 'out_of_scope' ? 403 : 422);
+        }
+
+        return response()->json([
+            'cleared_ids' => $outcome['cleared_ids'],
+            'message' => 'Removed from the auto schedule — the subject is left unscheduled.',
             'sectionSubjects' => $section->sectionSubjects()->with(['subject.recommendedRooms:id', 'faculty', 'room', 'mergedInto.section:id,section_code'])->get(),
             'schedule_version' => $section->fresh()->schedule_version,
         ]);
@@ -2876,7 +2985,7 @@ class SectionSubjectController extends Controller implements HasMiddleware
                 // can't abort(403) the whole request (a batch mixes
                 // in-scope and out-of-scope rows), so it's reported as
                 // a per-row error and simply not saved instead.
-                if (AccessScope::isAssistantDean($request->user()) && $subject->subject && ! $subject->subject->isSharedResource()) {
+                if (AccessScope::isRestrictedToSharedCategoriesFor($request->user(), $sectionCollegeId) && $subject->subject && ! $subject->subject->isSharedResource()) {
                     $rowErrors['category'] = "{$subject->subject->subject_code} is a Major subject — outside your Assistant Dean scheduling scope (GenEd/Minor only). The Dean/OIC manages this subject's schedule.";
                     $errors[$subject->id] = $rowErrors;
                     $skippedIds[] = $subject->id;
@@ -3253,11 +3362,35 @@ class SectionSubjectController extends Controller implements HasMiddleware
             }
         }
 
-        $message = empty($skippedIds)
-            ? 'Schedule saved successfully.'
-            : count($savedIds).' of '.count($rowIds).' subjects saved. '
-                .count($skippedIds).' '.(count($skippedIds) === 1 ? 'subject was' : 'subjects were')
-                .' skipped due to a scheduling conflict — see the highlighted rows.';
+        // MESSAGE — distinguish a role-scope skip (this Dean/OIC/
+        // Assistant Dean was never allowed to touch this row) from an
+        // actual scheduling conflict (room/faculty overlap, capacity,
+        // workload, etc.), so the toast doesn't tell a Dean their OWN
+        // Major subject was "skipped due to a scheduling conflict"
+        // when the real reason is simply that this Section belongs to
+        // a different College than the one they're scoped to. The
+        // category check above always `continue`s immediately, so a
+        // category-skipped row's $errors entry only ever has that one
+        // key — safe to key off it directly.
+        $categorySkippedCount = collect($skippedIds)
+            ->filter(fn ($id) => isset($errors[$id]['category']))
+            ->count();
+        $otherSkippedCount = count($skippedIds) - $categorySkippedCount;
+
+        $message = match (true) {
+            empty($skippedIds) => 'Schedule saved successfully.',
+            $otherSkippedCount === 0 => count($savedIds).' of '.count($rowIds).' subjects saved. '
+                .$categorySkippedCount.' '.($categorySkippedCount === 1 ? 'subject is' : 'subjects are')
+                .' outside your role\'s scheduling scope — see the highlighted rows for details.',
+            $categorySkippedCount === 0 => count($savedIds).' of '.count($rowIds).' subjects saved. '
+                .$otherSkippedCount.' '.($otherSkippedCount === 1 ? 'subject was' : 'subjects were')
+                .' skipped due to a scheduling conflict — see the highlighted rows.',
+            default => count($savedIds).' of '.count($rowIds).' subjects saved. '
+                .$categorySkippedCount.' '.($categorySkippedCount === 1 ? 'subject is' : 'subjects are')
+                .' outside your role\'s scheduling scope, and '
+                .$otherSkippedCount.' '.($otherSkippedCount === 1 ? 'subject was' : 'subjects were')
+                .' skipped due to a scheduling conflict — see the highlighted rows.',
+        };
 
         return response()->json([
             'sectionSubjects' => $fresh,

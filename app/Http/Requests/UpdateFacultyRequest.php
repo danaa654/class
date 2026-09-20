@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Models\FacultyLoadRequest;
+use App\Services\FacultyWorkloadService;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -60,5 +61,52 @@ class UpdateFacultyRequest extends FormRequest
             'contact_number' => ['nullable', 'string', 'max:20'],
             'remarks' => ['nullable', 'string'],
         ];
+    }
+
+    /**
+     * Never let the load ceiling be lowered below what this faculty
+     * member is already carrying. e.g. Aro has 6 units of scheduled
+     * subjects, so her Maximum Teaching Units can't be set to 0-5 —
+     * the subjects must be unassigned first. Only checked when the
+     * ceiling is actually being lowered, so unrelated edits (email,
+     * status, ...) on an already-overloaded faculty still save.
+     */
+    public function withValidator($validator): void
+    {
+        $validator->after(function ($validator) {
+            $faculty = $this->route('faculty');
+
+            if (! $faculty || $validator->errors()->isNotEmpty()) {
+                return;
+            }
+
+            // Non-changeMaxLoad roles get the field pinned back in
+            // FacultyController::update(), so nothing to guard for them.
+            if (! $this->user()?->can('changeMaxLoad', $faculty::class)) {
+                return;
+            }
+
+            $type = $this->input('workload_type') ?: ($faculty->workload_type ?: 'units');
+            $field = $type === 'hours' ? 'max_weekly_hours' : 'max_teaching_units';
+            $label = $type === 'hours' ? 'hour(s)' : 'unit(s)';
+
+            $new = (int) $this->input($field);
+            $old = (int) $faculty->{$field};
+
+            if ($new >= $old) {
+                return;
+            }
+
+            $probe = clone $faculty;
+            $probe->workload_type = $type;
+            $current = app(FacultyWorkloadService::class)->currentLoad($probe);
+
+            if ($new < $current) {
+                $validator->errors()->add(
+                    $field,
+                    "This faculty member already has {$current} {$label} of scheduled subjects. The maximum cannot be set below {$current}. Unassign some subjects first."
+                );
+            }
+        });
     }
 }

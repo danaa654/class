@@ -4,6 +4,8 @@ import { ref, computed, watch } from 'vue';
 import { useToast } from 'primevue/usetoast';
 import Swal from 'sweetalert2';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import LoadingSkeleton from '@/Components/LoadingSkeleton.vue';
+import { useDebouncedRef } from '@/composables/useDebounce';
 import Card from 'primevue/card';
 import InputText from 'primevue/inputtext';
 import InputNumber from 'primevue/inputnumber';
@@ -109,13 +111,16 @@ watch(
 /* Search / list                                                       */
 /* ------------------------------------------------------------------ */
 
-const search = ref(props.filters.section_search ?? '');
+// PERFORMANCE — debounce input handlers: writes to `search` land
+// 350ms after the user stops typing, so the watch() below (and the
+// server round-trip it triggers) fires once per pause, not once per
+// keystroke. See resources/js/composables/useDebounce.js.
+const search = useDebouncedRef(props.filters.section_search ?? '', 350);
 const selectedTerm = ref(props.filters.term ?? 'all');
 const selectedCollegeId = ref(props.filters.college_id ?? null);
 const selectedYearLevel = ref(props.filters.year_level || null);
 const selectedSchedulingStatus = ref(props.filters.scheduling_status || 'all');
 const loading = ref(false);
-let searchDebounce = null;
 
 // College dropdown — "All Colleges" plus every College this user is
 // authorized to see (already scoped server-side, see
@@ -241,11 +246,10 @@ const onRowClick = (event) => {
     goToSectionSubjects(event.data);
 };
 
+// `search` is already a debounced ref (see useDebouncedRef above), so
+// this watch naturally fires once per typing pause, not per keystroke.
 watch(search, () => {
-    clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => {
-        reloadSections({ section_page: 1 });
-    }, 350);
+    reloadSections({ section_page: 1 });
 });
 
 const onPage = (event) => {
@@ -1470,7 +1474,13 @@ const onUnlockSection = (section) => {
                     </div>
 
                     <!-- Sections Table -->
+                    <!-- PERFORMANCE (perceived) — full skeleton on the very
+                         first load (no rows yet); PrimeVue's own :loading
+                         overlay below still covers subsequent filter/page
+                         reloads, so users never see a blank/frozen table. -->
+                    <LoadingSkeleton v-if="loading && !sections.data.length" variant="table" :rows="8" :columns="6" />
                     <DataTable
+                        v-else
                         :value="sections.data"
                         :loading="loading"
                         dataKey="id"

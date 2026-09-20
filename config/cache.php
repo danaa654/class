@@ -15,7 +15,14 @@ return [
     |
     */
 
-    'default' => env('CACHE_STORE', 'database'),
+    // PERFORMANCE — 'database' cache means every Cache::remember()
+    // (see DashboardService::overview, ScheduleConflictService's
+    // cached lookups, etc.) round-trips through the SAME MySQL
+    // connection you're trying to take load off of. Redis is an
+    // in-memory store, so caching actually saves a query instead of
+    // just moving it. Set CACHE_STORE=redis in .env (falls back to
+    // 'database' automatically if Redis isn't configured/running).
+    'default' => env('CACHE_STORE', 'redis'),
 
     /*
     |--------------------------------------------------------------------------

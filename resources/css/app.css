@@ -1235,6 +1235,79 @@ html.dark .p-autocomplete-empty-message {
     color: #94A3B8 !important;
 }
 
+/* ------------------------------------------------------------------ */
+/* Dark mode: readable text while the cursor is over an option/row     */
+/* ------------------------------------------------------------------ */
+/* 1) PrimeVue dropdown options (Select, MultiSelect, AutoComplete,
+      CascadeSelect, Listbox).
+      Moving the mouse over an option makes PrimeVue add its own
+      ".p-focus" class, and PrimeVue's default focus background is a
+      near-white grey. The dark-mode text colour above is light
+      (#E2E8F0), so the hovered option turned into light text on a
+      white row. Force a dark-friendly highlight + white text for both
+      :hover and .p-focus (mouse and keyboard navigation). */
+html.dark .p-select-option:not(.p-select-option-selected):hover,
+html.dark .p-select-option:not(.p-select-option-selected).p-focus,
+html.dark .p-multiselect-option:not(.p-multiselect-option-selected):hover,
+html.dark .p-multiselect-option:not(.p-multiselect-option-selected).p-focus,
+html.dark .p-autocomplete-option:hover,
+html.dark .p-autocomplete-option.p-focus,
+html.dark .p-cascadeselect-option:not(.p-cascadeselect-option-selected):hover,
+html.dark .p-cascadeselect-option:not(.p-cascadeselect-option-selected).p-focus,
+html.dark .p-listbox-option:not(.p-listbox-option-selected):hover,
+html.dark .p-listbox-option:not(.p-listbox-option-selected).p-focus {
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: #FFFFFF !important;
+}
+
+/* Muted spans inside a templated option (e.g. the " — Subject Title"
+   part) would otherwise stay dim grey on the highlighted row. */
+html.dark .p-select-option:hover .text-slate-400,
+html.dark .p-select-option:hover .text-slate-500,
+html.dark .p-select-option.p-focus .text-slate-400,
+html.dark .p-select-option.p-focus .text-slate-500,
+html.dark .p-multiselect-option:hover .text-slate-400,
+html.dark .p-multiselect-option:hover .text-slate-500,
+html.dark .p-multiselect-option.p-focus .text-slate-400,
+html.dark .p-multiselect-option.p-focus .text-slate-500 {
+    color: #CBD5E1 !important;
+}
+
+/* 2) Tailwind "hover:" utilities on rows/buttons inside dark pages and
+      dialogs (everything wrapped in ".dark-scope").
+      The per-page dark rules only recolour the plain classes
+      (e.g. ".bg-slate-50"), never the "hover:" variants — so hovering a
+      row painted it #F8FAFC while its text was light (unreadable), and
+      "hover:text-slate-700" painted dark text on the dark background.
+      Defined globally here (not in a scoped <style>) so it also reaches
+      dialogs/popovers that PrimeVue teleports to <body>. */
+html.dark .dark-scope .hover\:bg-slate-50:hover,
+html.dark .dark-scope .hover\:bg-slate-100:hover {
+    background-color: rgba(255, 255, 255, 0.08) !important;
+}
+html.dark .dark-scope .hover\:bg-slate-200:hover {
+    background-color: rgba(255, 255, 255, 0.14) !important;
+}
+html.dark .dark-scope .hover\:bg-blue-50:hover,
+html.dark .dark-scope .hover\:bg-blue-50\/40:hover {
+    background-color: rgba(59, 130, 246, 0.18) !important;
+}
+html.dark .dark-scope .hover\:text-slate-600:hover,
+html.dark .dark-scope .hover\:text-slate-700:hover,
+html.dark .dark-scope .group:hover .group-hover\:text-slate-900 {
+    color: #F1F5F9 !important;
+}
+
+/* Because the hover background above is now dark, the text that sits on
+   it must be light too. These match the colours the pages already use
+   for these classes, but are declared globally so teleported dialogs
+   (e.g. "Auto Schedule Complete") get them as well. */
+html.dark .dark-scope .text-slate-900,
+html.dark .dark-scope .text-slate-800 { color: #F1F5F9 !important; }
+html.dark .dark-scope .text-slate-700 { color: #CBD5E1 !important; }
+html.dark .dark-scope .text-slate-600,
+html.dark .dark-scope .text-slate-500 { color: #94A3B8 !important; }
+
 /* Filter box inside searchable dropdowns — inset well, matching the
    ".neu-form" field treatment used elsewhere. */
 .p-select-filter-container,
@@ -1419,6 +1492,81 @@ html.dark .p-multiselect-filter {
     box-shadow: none;
 }
 
+/* =========================================================================
+   Sidebar "notch" tab — the active nav item is painted in the page colour
+   and runs flush to the sidebar's right edge, with an inverted curve above
+   and below so it reads as the page flowing into the sidebar.
+
+   To make the tab merge seamlessly with the page, it repeats the page's
+   gradient wash (see .app-gradient-bg in AppLayout.vue) using
+   `background-attachment: fixed`, so both line up pixel for pixel.
+   Keep --nav-tab-wash in sync with those gradients if they ever change.
+   ========================================================================= */
+:root {
+    --nav-tab-r: 16px;
+    --nav-tab-base: #F2F2F2;
+    --nav-tab-ink: #2563EB;
+    --nav-tab-wash:
+        radial-gradient(60rem 40rem at 0% 0%, rgba(37, 99, 235, 0.26), transparent 60%),
+        radial-gradient(50rem 36rem at 100% 10%, rgba(124, 58, 237, 0.20), transparent 60%),
+        radial-gradient(55rem 40rem at 100% 100%, rgba(225, 29, 46, 0.15), transparent 60%),
+        radial-gradient(50rem 36rem at 0% 100%, rgba(56, 189, 248, 0.20), transparent 60%);
+}
+
+:root.dark {
+    --nav-tab-base: #0B1020;
+    --nav-tab-ink: #38BDF8;
+    --nav-tab-wash:
+        radial-gradient(60rem 40rem at 0% 0%, rgba(37, 99, 235, 0.28), transparent 60%),
+        radial-gradient(50rem 36rem at 100% 10%, rgba(124, 58, 237, 0.22), transparent 60%),
+        radial-gradient(55rem 40rem at 100% 100%, rgba(225, 29, 46, 0.16), transparent 60%),
+        radial-gradient(50rem 36rem at 0% 100%, rgba(56, 189, 248, 0.16), transparent 60%);
+}
+
+.nav-tab,
+.nav-tab::before,
+.nav-tab::after {
+    background-color: var(--nav-tab-base);
+    background-image: var(--nav-tab-wash);
+    background-attachment: fixed;
+}
+
+.nav-tab {
+    position: relative;
+    color: var(--nav-tab-ink);
+}
+
+/* Dark mode: a faint glow on the label and icon so the tab stands out
+   against the navy sidebar. */
+:root.dark .nav-tab {
+    text-shadow: 0 0 10px rgba(56, 189, 248, 0.55);
+}
+
+.nav-tab::before,
+.nav-tab::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    width: var(--nav-tab-r);
+    height: var(--nav-tab-r);
+    pointer-events: none;
+}
+
+/* Curve above the tab: page colour everywhere except a quarter-circle
+   scooped out of the top-left corner. */
+.nav-tab::before {
+    top: calc(var(--nav-tab-r) * -1);
+    -webkit-mask: radial-gradient(circle at 0 0, transparent var(--nav-tab-r), #000 calc(var(--nav-tab-r) + 0.5px));
+    mask: radial-gradient(circle at 0 0, transparent var(--nav-tab-r), #000 calc(var(--nav-tab-r) + 0.5px));
+}
+
+/* Curve below the tab: same, scooped from the bottom-left corner. */
+.nav-tab::after {
+    bottom: calc(var(--nav-tab-r) * -1);
+    -webkit-mask: radial-gradient(circle at 0 100%, transparent var(--nav-tab-r), #000 calc(var(--nav-tab-r) + 0.5px));
+    mask: radial-gradient(circle at 0 100%, transparent var(--nav-tab-r), #000 calc(var(--nav-tab-r) + 0.5px));
+}
+
 /* SweetAlert2 confirm/alert popups vs. PrimeVue Dialogs — PrimeVue
    assigns its own <Dialog> mask a z-index dynamically at mount time
    (via its zIndex service) and that number climbs with every dialog
@@ -1486,3 +1634,243 @@ html.dark .p-multiselect-filter {
     background: rgba(255, 255, 255, 0.12) !important;
     color: #ffffff !important;
 }
+
+/* ------------------------------------------------------------------ */
+/* Dark mode: faculty picker inside "Auto Schedule Complete"           */
+/* ------------------------------------------------------------------ */
+/* The faculty search box and its suggestion list are plain white
+   elements (bg-white). The dark text colours above made the name
+   unreadable on that white. Give both a dark surface so they match the
+   Room / Time fields next to them. */
+html.dark .dark-scope .faculty-recommendation-input {
+    background: transparent !important;
+    color: #F1F5F9 !important;
+}
+html.dark .dark-scope .faculty-recommendation-input::placeholder {
+    color: #94A3B8 !important;
+}
+html.dark .dark-scope .faculty-recommendation-panel {
+    background: #0F1730 !important;
+    border-color: rgba(255, 255, 255, 0.14) !important;
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55) !important;
+}
+html.dark .dark-scope .faculty-recommendation-panel .bg-slate-50 {
+    background-color: rgba(59, 130, 246, 0.16) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* Auto-generate scope picker (Section Subjects page)                  */
+/* ------------------------------------------------------------------ */
+.scope-value { display: inline-flex; align-items: center; gap: 0.55rem; min-width: 0; }
+.scope-value__label { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.scope-icon {
+    display: inline-flex; align-items: center; justify-content: center; flex: none;
+    width: 2.25rem; height: 2.25rem; border-radius: 0.8rem; color: #fff; font-size: 0.95rem;
+    box-shadow: 0 6px 14px rgba(37, 99, 235, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+    transition: transform 0.18s ease;
+}
+.scope-icon--sm { width: 1.5rem; height: 1.5rem; border-radius: 0.5rem; font-size: 0.72rem; box-shadow: none; }
+.scope-icon--all { background: linear-gradient(135deg, #2563EB, #8B5CF6); }
+.scope-icon--major_only { background: linear-gradient(135deg, #10B981, #0EA5E9); box-shadow: 0 6px 14px rgba(16, 185, 129, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.35); }
+.scope-icon--sm.scope-icon--all, .scope-icon--sm.scope-icon--major_only { box-shadow: none; }
+
+.p-select-overlay.scope-picker-overlay {
+    min-width: 18.5rem;
+    padding: 0.55rem !important;
+    border-radius: 1.15rem !important;
+    animation: scopePop 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+.scope-picker-overlay .p-select-list-container { max-height: none !important; }
+.scope-picker-overlay .p-select-list { display: flex; flex-direction: column; gap: 0.35rem; padding: 0.1rem !important; }
+
+.scope-header {
+    padding: 0.3rem 0.65rem 0.5rem; font-size: 0.66rem; font-weight: 700;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #64748B;
+}
+
+.scope-picker-overlay .p-select-option {
+    padding: 0.55rem 0.65rem !important; margin: 0 !important;
+    border: 1px solid transparent; border-radius: 0.9rem !important;
+    background: transparent !important; color: #1E293B !important;
+    transition: transform 0.16s ease, background-color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+    animation: scopeIn 0.24s ease both;
+}
+.scope-picker-overlay .p-select-option:nth-child(2) { animation-delay: 0.05s; }
+
+.scope-opt { display: flex; align-items: center; gap: 0.75rem; width: 100%; }
+.scope-opt__text { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.25; }
+.scope-opt__title { font-size: 0.9rem; font-weight: 700; }
+.scope-opt__desc { font-size: 0.74rem; font-weight: 500; color: #64748B; }
+.scope-opt__check { font-size: 1.05rem; color: #2563EB; }
+
+/* hover / keyboard focus */
+.scope-picker-overlay .p-select-option:not(.p-select-option-selected):hover,
+.scope-picker-overlay .p-select-option:not(.p-select-option-selected).p-focus {
+    background: rgba(37, 99, 235, 0.07) !important; color: #0F172A !important;
+    border-color: rgba(37, 99, 235, 0.2); transform: translateX(3px);
+}
+.scope-picker-overlay .p-select-option:hover .scope-icon { transform: scale(1.08) rotate(-4deg); }
+
+/* selected */
+.scope-picker-overlay .p-select-option.p-select-option-selected {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.13), rgba(139, 92, 246, 0.13)) !important;
+    border-color: rgba(99, 102, 241, 0.4); color: #1E293B !important;
+    box-shadow: 0 6px 18px rgba(79, 70, 229, 0.14);
+}
+
+/* dark mode */
+html.dark .scope-header { color: #94A3B8; }
+html.dark .scope-picker-overlay .p-select-option,
+html.dark .scope-picker-overlay .p-select-option .scope-opt__title { color: #F8FAFC !important; }
+html.dark .scope-picker-overlay .p-select-option .scope-opt__desc { color: #94A3B8 !important; }
+html.dark .scope-picker-overlay .p-select-option:not(.p-select-option-selected):hover,
+html.dark .scope-picker-overlay .p-select-option:not(.p-select-option-selected).p-focus {
+    background: rgba(255, 255, 255, 0.07) !important; color: #FFFFFF !important;
+    border-color: rgba(255, 255, 255, 0.16);
+}
+html.dark .scope-picker-overlay .p-select-option:hover .scope-opt__desc,
+html.dark .scope-picker-overlay .p-select-option.p-focus .scope-opt__desc { color: #CBD5E1 !important; }
+html.dark .scope-picker-overlay .p-select-option.p-select-option-selected {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.32), rgba(139, 92, 246, 0.26)) !important;
+    border-color: rgba(129, 140, 248, 0.55); color: #FFFFFF !important;
+    box-shadow: 0 8px 22px rgba(37, 99, 235, 0.25);
+}
+html.dark .scope-picker-overlay .p-select-option .scope-opt__check { color: #93C5FD; }
+
+@keyframes scopePop { from { opacity: 0; transform: translateY(-6px) scale(0.97); } to { opacity: 1; transform: none; } }
+@keyframes scopeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+    .p-select-overlay.scope-picker-overlay, .scope-picker-overlay .p-select-option { animation: none; }
+}
+
+
+/* ================================================================== */
+/* Creative buttons (site-wide PrimeVue <Button>)                      */
+/* ================================================================== */
+/* To undo the whole redesign, delete everything from this comment down
+   to the "END creative buttons" marker. Buttons that carry their own
+   colours (Tailwind "!bg-…" utilities, inline background styles, the
+   Reports page's .report-btn--* buttons) and text/link buttons are left
+   alone. */
+
+/* per-severity palette: gradient start / end + glow colour (r,g,b) */
+.p-button                  { --btn-a: #16A34A; --btn-b: #059669; --btn-glow: 34, 197, 94; }
+.p-button.p-button-success { --btn-a: #16A34A; --btn-b: #059669; --btn-glow: 34, 197, 94; }
+.p-button.p-button-help    { --btn-a: #9333EA; --btn-b: #6D28D9; --btn-glow: 168, 85, 247; }
+.p-button.p-button-info    { --btn-a: #0284C7; --btn-b: #2563EB; --btn-glow: 14, 165, 233; }
+.p-button.p-button-danger  { --btn-a: #E11D48; --btn-b: #B91C1C; --btn-glow: 244, 63, 94; }
+.p-button.p-button-warn    { --btn-a: #D97706; --btn-b: #EA580C; --btn-glow: 245, 158, 11; }
+.p-button.p-button-secondary { --btn-glow: 100, 116, 139; }
+.p-button.p-button-contrast  { --btn-glow: 100, 116, 139; }
+
+/* ---- motion layer: every filled + outlined button ---- */
+.p-button.p-button:not(.p-button-text):not(.p-button-link):not([class*="report-btn"]):not([class*="!bg-"]) {
+    position: relative;
+    overflow: hidden;
+    transition:
+        transform 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.3),
+        box-shadow 0.25s ease,
+        background-position 0.5s ease,
+        background-color 0.2s ease,
+        border-color 0.2s ease !important;
+}
+
+/* light sweep that glides across on hover */
+.p-button.p-button:not(.p-button-text):not(.p-button-link):not([class*="report-btn"]):not([class*="!bg-"])::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    transform: translateX(-125%);
+    transition: transform 0.65s ease;
+    background: linear-gradient(115deg, transparent 32%, rgba(255, 255, 255, 0.38) 50%, transparent 68%);
+}
+.p-button.p-button.p-button-outlined:not([class*="report-btn"]):not([class*="!bg-"])::after {
+    background: linear-gradient(115deg, transparent 32%, color-mix(in srgb, currentColor 24%, transparent) 50%, transparent 68%);
+}
+.p-button.p-button:not(.p-button-text):not(.p-button-link):not(:disabled):not([class*="report-btn"]):not([class*="!bg-"]):hover::after {
+    transform: translateX(125%);
+}
+
+/* lift on hover, squish on press */
+.p-button.p-button:not(.p-button-text):not(.p-button-link):not(:disabled):not([class*="report-btn"]):not([class*="!bg-"]):hover {
+    transform: translateY(-2px);
+}
+.p-button.p-button:not(.p-button-text):not(.p-button-link):not(:disabled):not([class*="report-btn"]):not([class*="!bg-"]):active {
+    transform: translateY(0) scale(0.96);
+}
+
+/* ---- filled: gradient + tinted glow ---- */
+.p-button.p-button:not(.p-button-outlined):not(.p-button-text):not(.p-button-link):not(.p-button-secondary):not(.p-button-contrast):not([class*="report-btn"]):not([class*="!bg-"]):not([style*="background"]) {
+    background: linear-gradient(135deg, var(--btn-a), var(--btn-b), var(--btn-a)) !important;
+    background-size: 220% 220% !important;
+    background-position: 0% 50% !important;
+    border-color: transparent !important;
+    color: #FFFFFF !important;
+    font-weight: 600;
+    box-shadow:
+        0 4px 12px rgba(var(--btn-glow), 0.28),
+        inset 0 1px 0 rgba(255, 255, 255, 0.3) !important;
+}
+.p-button.p-button:not(.p-button-outlined):not(.p-button-text):not(.p-button-link):not(.p-button-secondary):not(.p-button-contrast):not(:disabled):not([class*="report-btn"]):not([class*="!bg-"]):not([style*="background"]):hover {
+    background-position: 100% 50% !important;
+    box-shadow:
+        0 12px 26px rgba(var(--btn-glow), 0.45),
+        0 0 0 3px rgba(var(--btn-glow), 0.16),
+        inset 0 1px 0 rgba(255, 255, 255, 0.4) !important;
+}
+.p-button.p-button:not(.p-button-outlined):not(.p-button-text):not(.p-button-link):not(.p-button-secondary):not(.p-button-contrast):not(:disabled):not([class*="report-btn"]):not([class*="!bg-"]):not([style*="background"]):active {
+    box-shadow: 0 2px 6px rgba(var(--btn-glow), 0.35), inset 0 2px 4px rgba(0, 0, 0, 0.18) !important;
+}
+.p-button.p-button:not(.p-button-outlined):not(.p-button-text):not(.p-button-link):not(.p-button-secondary):not(.p-button-contrast):not([class*="report-btn"]):not([class*="!bg-"]):not([style*="background"]):disabled {
+    background: linear-gradient(135deg, var(--btn-a), var(--btn-b)) !important;
+    opacity: 0.45;
+    box-shadow: none !important;
+}
+
+/* ---- outlined: colour-tinted fill + glow ring on hover ---- */
+.p-button.p-button.p-button-outlined:not(:disabled):not([class*="report-btn"]):not([class*="!bg-"]):hover {
+    background: color-mix(in srgb, currentColor 13%, transparent) !important;
+    box-shadow:
+        0 0 0 3px color-mix(in srgb, currentColor 16%, transparent),
+        0 10px 22px color-mix(in srgb, currentColor 20%, transparent) !important;
+}
+.p-button.p-button.p-button-outlined:not(:disabled):not([class*="report-btn"]):not([class*="!bg-"]):active {
+    background: color-mix(in srgb, currentColor 20%, transparent) !important;
+    box-shadow: none !important;
+}
+
+/* keyboard focus */
+.p-button.p-button:not(.p-button-text):not(.p-button-link):focus-visible {
+    outline: none !important;
+    box-shadow: 0 0 0 3px rgba(var(--btn-glow), 0.4) !important;
+}
+
+/* ---- icon micro-animations ---- */
+.p-button .p-button-icon { transition: transform 0.25s cubic-bezier(0.2, 0.9, 0.3, 1.4); }
+.p-button:not(:disabled):hover .pi-plus    { transform: rotate(90deg) scale(1.15); }
+.p-button:not(:disabled):hover .pi-refresh { transform: rotate(180deg); }
+.p-button:not(:disabled):hover .pi-save,
+.p-button:not(:disabled):hover .pi-print,
+.p-button:not(:disabled):hover .pi-download,
+.p-button:not(:disabled):hover .pi-upload,
+.p-button:not(:disabled):hover .pi-send    { transform: translateY(-2px) scale(1.12); }
+.p-button:not(:disabled):hover .pi-check   { transform: scale(1.3); }
+.p-button:not(:disabled):hover .pi-search  { transform: scale(1.18) rotate(-10deg); }
+.p-button:not(:disabled):hover .pi-trash   { transform: rotate(-12deg) scale(1.15); }
+.p-button:not(:disabled):hover .pi-bolt    { animation: btnBolt 0.7s ease-in-out infinite; }
+
+@keyframes btnBolt {
+    0%, 100% { transform: scale(1) rotate(0); filter: none; }
+    35%      { transform: scale(1.35) rotate(-8deg); filter: drop-shadow(0 0 6px rgba(253, 224, 71, 0.95)); }
+    60%      { transform: scale(1.1) rotate(6deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .p-button.p-button,
+    .p-button.p-button::after,
+    .p-button .p-button-icon { transition: none !important; animation: none !important; }
+    .p-button.p-button:hover { transform: none !important; }
+}
+/* END creative buttons */

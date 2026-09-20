@@ -4,6 +4,7 @@ import { ref, reactive, computed, watch, onMounted } from 'vue';
 import { useToast } from 'primevue/usetoast';
 import Swal from 'sweetalert2';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import BackLink from '@/Components/BackLink.vue';
 import Card from 'primevue/card';
 import Toolbar from 'primevue/toolbar';
 import InputText from 'primevue/inputtext';
@@ -2478,6 +2479,39 @@ const autoGenerating = ref(false);
 const autoGenerateProgress = ref(0);
 let autoGenerateProgressTimer = null;
 
+// SUBJECT-SCOPE CHOICE — Dean/OIC/Registrar/Admin can restrict a run
+// to Major subjects only, leaving GenEd/Minor for later (or vice
+// versa is not offered — GenEd/Minor-only is already what an
+// Assistant Dean gets automatically via their role scope, so this
+// control is hidden for them rather than letting them "choose" a
+// scope they can't actually widen).
+const autoGenerateSubjectScope = ref('all');
+// Options for the Auto Generate scope picker (icon + short description
+// are rendered by the #option / #value slots on the <Select> below).
+const autoScopeOptions = [
+    { label: 'Major + GenEd/Minor', value: 'all', icon: 'pi pi-th-large', desc: 'Every unscheduled subject' },
+    { label: 'Major subjects only', value: 'major_only', icon: 'pi pi-bookmark', desc: 'Skip GenEd & Minor subjects' },
+];
+const autoScopeOption = (value) => autoScopeOptions.find((o) => o.value === value) ?? autoScopeOptions[0];
+const isAssistantDean = computed(() =>
+    (page.props.auth?.roles ?? []).includes('Assistant Dean')
+    || !! page.props.auth?.user?.is_gened_assistant_dean
+);
+
+// HARD ROLE RESTRICTION (mirrors AccessScope::isRestrictedToMajorOnlyFor
+// server-side) — a plain Dean/OIC with no Assistant Dean authority of
+// their own is always Major-only for Auto Generate; GenEd/Minor is the
+// Assistant Dean's job to generate. The toggle below is hidden for
+// them too, same reasoning as isAssistantDean above: it wouldn't
+// actually offer them a scope they could widen into. A dual-role
+// Dean-and-Assistant-Dean user is neither of these — isAssistantDean
+// above already covers their (wider) case, so this only matches a
+// PURE Dean/OIC.
+const isMajorOnlyDean = computed(() =>
+    !isAssistantDean.value
+    && (page.props.auth?.roles ?? []).some((role) => ['Dean', 'OIC'].includes(role))
+);
+
 const startAutoGenerateProgress = () => {
     autoGenerateProgress.value = 0;
     clearInterval(autoGenerateProgressTimer);
@@ -2505,6 +2539,11 @@ const autoClearing = ref(false);
 const clearingSchedule = ref(false);
 const autoSummaryVisible = ref(false);
 const autoSummary = ref(null); // { total, scheduled, results, unresolved, message }
+// Subjects the user removed (X) from the review panel. Regenerate skips
+// these; the list is thrown away whenever the review panel is closed or a
+// brand-new Auto Generate run starts.
+const autoExcludedRowIds = ref(new Set());
+const autoRemovingIds = ref(new Set());
 
 const applyFreshRows = (fresh) => {
     fresh.forEach((freshRow) => {
@@ -2657,9 +2696,49 @@ const chooseIndependentSchedule = async () => {
     }
 };
 
+// DAYS TO KEEP FREE — clicking Auto Generate first opens a small modal
+// where the user can tick days this section should have NO auto-placed
+// classes on (e.g. keep Friday free for online subjects placed by hand).
+// Picking nothing just generates as before. The choice is remembered for
+// this page so Regenerate reuses it. Sent to the backend as
+// `excluded_days`; see AutoScheduleService::generate().
+const autoDaysModalVisible = ref(false);
+const autoExcludedDays = ref([]);
+const fullDayNames = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday', Sun: 'Sunday' };
+const autoDayChoices = computed(() =>
+    orderedDayTokens
+        .filter((token) => dayOptions.value.some((option) => option.value === token))
+        .map((token) => ({ value: token, name: fullDayNames[token] ?? token }))
+);
+const toggleAutoExcludedDay = (day) => {
+    autoExcludedDays.value = autoExcludedDays.value.includes(day)
+        ? autoExcludedDays.value.filter((d) => d !== day)
+        : [...autoExcludedDays.value, day];
+};
+// At least one class day must stay available, or nothing could be placed.
+const autoExcludesEveryDay = computed(() =>
+    autoDayChoices.value.length > 0 && autoDayChoices.value.every((choice) => autoExcludedDays.value.includes(choice.value))
+);
+const autoGenerateConfirmLabel = computed(() => {
+    const free = orderedDayTokens.filter((token) => autoExcludedDays.value.includes(token));
+    return free.length === 0 ? 'Generate Schedule' : `Generate (keep ${free.map((d) => fullDayNames[d] ?? d).join(', ')} free)`;
+});
+const openAutoGenerateModal = () => {
+    if (rows.value.length === 0) return;
+    // Drop any remembered day the calendar no longer allows.
+    autoExcludedDays.value = autoExcludedDays.value.filter((day) => autoDayChoices.value.some((c) => c.value === day));
+    autoDaysModalVisible.value = true;
+};
+const confirmAutoGenerate = () => {
+    if (autoExcludesEveryDay.value) return;
+    autoDaysModalVisible.value = false;
+    runAutoGenerate();
+};
+
 const runAutoGenerate = async () => {
     if (rows.value.length === 0) return;
 
+    autoExcludedRowIds.value = new Set();
     autoGenerating.value = true;
     startAutoGenerateProgress();
 
@@ -2671,7 +2750,11 @@ const runAutoGenerate = async () => {
             // server-side; if another user's change already landed since
             // this page loaded, the backend rejects with 409 below
             // instead of silently generating against stale data.
-            body: JSON.stringify({ expected_schedule_version: schedulePolling.currentVersion.value }),
+            body: JSON.stringify({
+                expected_schedule_version: schedulePolling.currentVersion.value,
+                subject_scope: autoGenerateSubjectScope.value,
+                excluded_days: autoExcludedDays.value,
+            }),
         });
         const data = await response.json();
 
@@ -2707,7 +2790,7 @@ const runAutoGenerate = async () => {
         toast.add({
             severity: data.scheduled === data.total ? 'success' : 'warn',
             summary: 'Auto Schedule Complete',
-            detail: data.message,
+            detail: data.message + (Array.isArray(data.excluded_days) && data.excluded_days.length ? ` Kept free: ${data.excluded_days.map((d) => fullDayNames[d] ?? d).join(', ')}.` : ''),
             life: 6000,
         });
     } catch (e) {
@@ -2726,7 +2809,13 @@ const regenerateAutoSchedule = async () => {
         const response = await fetch(route('scheduling.section-subjects.auto-generate.regenerate', props.section.id), {
             method: 'POST',
             headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfToken() },
-            body: JSON.stringify({ expected_schedule_version: schedulePolling.currentVersion.value }),
+            body: JSON.stringify({
+                expected_schedule_version: schedulePolling.currentVersion.value,
+                subject_scope: autoGenerateSubjectScope.value,
+                excluded_days: autoExcludedDays.value,
+                // Subjects the user removed with the X are skipped this time.
+                exclude_section_subject_ids: [...autoExcludedRowIds.value],
+            }),
         });
         const data = await response.json();
 
@@ -2865,6 +2954,79 @@ const clearWholeSchedule = async () => {
     }
 };
 
+// "X" on a card in the review panel — removes that ONE subject from the
+// generated schedule. The row is reverted to an empty slot on the server
+// (so it can be scheduled by hand later) and remembered in
+// autoExcludedRowIds so "Regenerate" skips it instead of scheduling it again.
+const removeAutoResult = async (result) => {
+    const id = result?.section_subject_id;
+    if (!id || autoGenerating.value || autoRemovingIds.value.has(id)) return;
+
+    autoRemovingIds.value = new Set([...autoRemovingIds.value, id]);
+
+    try {
+        const response = await fetch(route('scheduling.section-subjects.auto-generate.clear-one', [props.section.id, id]), {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'X-XSRF-TOKEN': csrfToken() },
+        });
+        const data = await response.json();
+
+        if (!response.ok) throw new Error(data.message ?? 'Could not remove this subject.');
+
+        applyFreshRows(data.sectionSubjects ?? []);
+
+        const clearedIds = new Set(data.cleared_ids?.length ? data.cleared_ids : [id]);
+        autoExcludedRowIds.value = new Set([...autoExcludedRowIds.value, ...clearedIds]);
+
+        if (dockedEditSectionSubjectId.value && clearedIds.has(dockedEditSectionSubjectId.value)) {
+            dockedEditSectionSubjectId.value = null;
+        }
+
+        if (typeof data.schedule_version === 'number') {
+            schedulePolling.acceptVersion(data.schedule_version);
+        }
+
+        const summary = autoSummary.value;
+        if (summary) {
+            const before = summary.results?.length ?? 0;
+            summary.results = (summary.results ?? []).filter((r) => !clearedIds.has(r.section_subject_id));
+            const removed = before - summary.results.length;
+
+            summary.scheduled = Math.max(0, (summary.scheduled ?? 0) - removed);
+            summary.total = Math.max(0, (summary.total ?? 0) - removed);
+            summary.removed_by_user = (summary.removed_by_user ?? 0) + removed;
+
+            const unresolvedCount = summary.unresolved?.length ?? 0;
+            let message = unresolvedCount > 0
+                ? `${summary.scheduled} of ${summary.total} subjects scheduled. ${unresolvedCount} ${unresolvedCount === 1 ? 'subject requires' : 'subjects require'} manual scheduling.`
+                : `${summary.scheduled} of ${summary.total} subjects scheduled. No conflicts detected.`;
+            message += ` ${summary.removed_by_user} removed by you and left unscheduled.`;
+            summary.message = message;
+
+            // Nothing left to review — close the panel (programmatic close,
+            // so it doesn't run the "discard everything" handler below).
+            if (summary.results.length === 0 && unresolvedCount === 0) {
+                autoSummaryVisible.value = false;
+                autoSummary.value = null;
+                dockedEditSectionSubjectId.value = null;
+            }
+        }
+
+        toast.add({
+            severity: 'info',
+            summary: 'Removed from auto schedule',
+            detail: `${result.subject_code ?? 'The subject'} was left unscheduled — you can schedule it manually.`,
+            life: 4500,
+        });
+    } catch (e) {
+        toast.add({ severity: 'error', summary: 'Error', detail: e.message ?? 'Could not remove this subject.', life: 6000 });
+    } finally {
+        const next = new Set(autoRemovingIds.value);
+        next.delete(id);
+        autoRemovingIds.value = next;
+    }
+};
+
 // Closing the review panel (✕ button, ESC, or clicking outside)
 // WITHOUT clicking "Accept All & Save" must not leave anything
 // behind — the generated rows (and any manual Faculty/Room overrides
@@ -2883,6 +3045,7 @@ const onAutoSummaryVisibleChange = async (visible) => {
     }
 
     autoSummaryVisible.value = false;
+    autoExcludedRowIds.value = new Set();
     // Nothing should still be docked open in the right-side Edit Day
     // & Time panel once the modal itself is closed — otherwise the
     // very next Auto Generate Schedule run would open with some
@@ -2923,6 +3086,7 @@ const acceptAutoSchedule = async () => {
     await saveSchedule();
     autoSummaryVisible.value = false;
     autoSummary.value = null;
+    autoExcludedRowIds.value = new Set();
 };
 
 // Faculty Recommendation Selector (Prompt 8.11) — the override is
@@ -3358,6 +3522,27 @@ const isSplitContinuation = (row) => {
     return firstIndex !== -1 && ownIndex !== firstIndex;
 };
 
+// Zebra striping per SUBJECT (not per <tr>): rows alternate 0/1 down the
+// table so each subject reads as its own band, and the two halves of a
+// split subject share one band instead of alternating between themselves.
+// Drives the 'stripe-a' / 'stripe-b' row classes below.
+const rowStripeById = computed(() => {
+    const stripes = new Map();
+    const splitBySubject = new Map();
+    let group = -1;
+    for (const r of rows.value) {
+        if (isSplitRow(r) && splitBySubject.has(r.subject_id)) {
+            stripes.set(r.id, splitBySubject.get(r.subject_id));
+            continue;
+        }
+        group++;
+        const stripe = group % 2;
+        stripes.set(r.id, stripe);
+        if (isSplitRow(r)) splitBySubject.set(r.subject_id, stripe);
+    }
+    return stripes;
+});
+
 const openSplitModal = (row) => {
     splitModalRow.value = row;
     splitErrors.value = {};
@@ -3500,9 +3685,7 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
         <div class="max-w-[100rem] mx-auto w-full" :class="isDark ? 'dark-scope' : ''">
             <!-- Back link -->
             <div class="mb-4">
-                <Link :href="route('scheduling.sections')" class="text-sm text-slate-500 hover:text-slate-700">
-                    <i class="pi pi-arrow-left mr-1"></i> Back to Sections
-                </Link>
+                <BackLink :href="route('scheduling.sections')" label="Back to Sections" />
             </div>
 
             <!-- REAL-TIME SCHEDULE CHANGE DETECTION — non-blocking notice
@@ -3624,7 +3807,7 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                         </ul>
                     </div>
                 </Popover>
-                <div class="flex items-center gap-3 shrink-0 section-actions">
+                <div class="flex flex-wrap items-center gap-3 min-w-0 sm:justify-end section-actions">
                     <span v-if="hasUnsavedChanges" class="text-sm text-amber-600 font-medium whitespace-nowrap">
                         <i class="pi pi-circle-fill text-[6px] align-middle mr-1"></i>Unsaved changes
                     </span>
@@ -3649,22 +3832,62 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                         :title="isSectionFinalized ? 'This section is finalized and locked.' : 'Wipe every subject\'s Faculty, Room, Day, and Time — including already-saved schedules.'"
                         @click="clearWholeSchedule"
                     />
-                    <Button
-                        label="Print"
-                        icon="pi pi-print"
-                        severity="info"
-                        outlined
-                        title="Print this section's schedule (Schedule by Section report)."
-                        @click="printSectionSchedule"
-                    />
+                    <!-- SUBJECT-SCOPE CHOICE — restrict Auto Generate to
+                         Major subjects only. Hidden for Assistant Dean
+                         (already GenEd/Minor-only by role) and for a
+                         plain Dean/OIC (already Major-only by role,
+                         see isMajorOnlyDean) — neither could actually
+                         widen their scope with this control, and for a
+                         plain Dean/OIC there's nothing else to show in
+                         its place: the button itself is their only
+                         scope, no label needed. -->
+                    <Select
+                        v-if="!isAssistantDean && !isMajorOnlyDean"
+                        v-model="autoGenerateSubjectScope"
+                        :options="autoScopeOptions"
+                        option-label="label"
+                        option-value="value"
+                        :disabled="autoGenerating || isSectionFinalized"
+                        class="neu-inset scope-select w-60"
+                        :pt="{ overlay: { class: 'scope-picker-overlay' } }"
+                        title="Which subjects Auto Generate Schedule should assign."
+                    >
+                        <template #value="{ value }">
+                            <span class="scope-value">
+                                <span class="scope-icon scope-icon--sm" :class="`scope-icon--${autoScopeOption(value).value}`">
+                                    <i :class="autoScopeOption(value).icon"></i>
+                                </span>
+                                <span class="scope-value__label">{{ autoScopeOption(value).label }}</span>
+                            </span>
+                        </template>
+                        <template #header>
+                            <div class="scope-header">Auto-generate scope</div>
+                        </template>
+                        <template #option="{ option, selected }">
+                            <div class="scope-opt">
+                                <span class="scope-icon" :class="`scope-icon--${option.value}`">
+                                    <i :class="option.icon"></i>
+                                </span>
+                                <span class="scope-opt__text">
+                                    <span class="scope-opt__title">{{ option.label }}</span>
+                                    <span class="scope-opt__desc">{{ option.desc }}</span>
+                                </span>
+                                <i v-if="selected" class="pi pi-check-circle scope-opt__check"></i>
+                            </div>
+                        </template>
+                    </Select>
                     <Button
                         :label="autoGenerateButtonLabel"
                         icon="pi pi-bolt"
                         severity="help"
                         :loading="autoGenerating"
                         :disabled="rows.length === 0 || isSectionFinalized"
-                        :title="isSectionFinalized ? 'This section is finalized and locked.' : 'Automatically assign the best Faculty, Room, Day, and Time for every unscheduled subject.'"
-                        @click="runAutoGenerate"
+                        :title="isSectionFinalized
+                            ? 'This section is finalized and locked.'
+                            : isMajorOnlyDean
+                                ? 'Automatically assign the best Faculty, Room, Day, and Time for every unscheduled Major subject. GenEd/Minor subjects are generated by the Assistant Dean.'
+                                : 'Automatically assign the best Faculty, Room, Day, and Time for every unscheduled subject.'"
+                        @click="openAutoGenerateModal"
                     />
                     <Button
                         label="Save Schedule"
@@ -3890,6 +4113,14 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                     aria-label="Refresh"
                                 />
                                 <Button
+                                    label="Print"
+                                    icon="pi pi-print"
+                                    severity="info"
+                                    outlined
+                                    title="Print this section's schedule (Schedule by Section report)."
+                                    @click="printSectionSchedule"
+                                />
+                                <Button
                                     label="Add Subject"
                                     icon="pi pi-plus"
                                     severity="success"
@@ -3920,10 +4151,10 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                 // subject to the first half's card — see
                                 // isSplitContinuation()'s docblock.
                                 isSplitContinuation(row) ? 'split-pair-second' : undefined,
+                                rowStripeById.get(row.id) === 1 ? 'stripe-b' : 'stripe-a',
                             ]
                         "
                         @row-click="onRowClick"
-                        stripedRows
                         responsiveLayout="scroll"
                         scrollable
                         scrollHeight="flex"
@@ -3958,31 +4189,31 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                          isSplitContinuation()'s docblock — which gets the slim
                                          "Line 1 (compact)" header below instead. -->
                                     <div v-if="!isSplitContinuation(data)" class="flex flex-wrap items-center gap-x-4 gap-y-1">
-                                        <div class="min-w-[6rem]">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">EDP Code</p>
-                                            <span v-if="data.edp_code" class="font-mono text-xs font-semibold text-indigo-700">
+                                        <div class="min-w-[7rem]">
+                                            <p class="text-xs uppercase tracking-wide text-slate-500">EDP Code</p>
+                                            <span v-if="data.edp_code" class="font-mono text-base font-bold text-indigo-700">
                                                 {{ data.edp_code }}
                                             </span>
-                                            <Tag v-else value="Pending" severity="secondary" class="!text-[0.65rem]" />
+                                            <Tag v-else value="Pending" severity="secondary" class="!text-sm" />
                                         </div>
                                         <div class="min-w-[6rem]">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Subject Code</p>
-                                            <span class="text-xs font-medium text-slate-700">{{ data.subject?.subject_code }}</span>
+                                            <p class="text-xs uppercase tracking-wide text-slate-500">Subject Code</p>
+                                            <span class="text-base font-semibold text-slate-800">{{ data.subject?.subject_code }}</span>
                                         </div>
-                                        <div class="min-w-[10rem] max-w-[16rem]">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Subject Title</p>
-                                            <span class="text-xs text-slate-700">{{ data.subject?.subject_title }}</span>
+                                        <div class="min-w-[12rem] max-w-[22rem]">
+                                            <p class="text-xs uppercase tracking-wide text-slate-500">Subject Title</p>
+                                            <span class="text-base text-slate-800">{{ data.subject?.subject_title }}</span>
                                         </div>
                                         <div class="min-w-[6rem]">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Category</p>
-                                            <Tag :value="data.subject?.category" :severity="categorySeverity(data.subject?.category)" class="!text-[0.65rem]" />
+                                            <p class="text-xs uppercase tracking-wide text-slate-500">Category</p>
+                                            <Tag :value="data.subject?.category" :severity="categorySeverity(data.subject?.category)" class="!text-sm" />
                                         </div>
-                                        <div class="w-9">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Units</p>
-                                            <span class="text-xs text-slate-700">{{ data.subject?.units }}</span>
+                                        <div class="w-12">
+                                            <p class="text-xs uppercase tracking-wide text-slate-500">Units</p>
+                                            <span class="text-base font-semibold text-slate-800">{{ data.subject?.units }}</span>
                                         </div>
                                         <div class="min-w-[7rem]">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Status</p>
+                                            <p class="text-xs uppercase tracking-wide text-slate-500">Status</p>
                                             <div class="flex items-center gap-1 flex-wrap">
                                                 <Tag :value="displayStatus(data)" :severity="statusSeverity(displayStatus(data))" class="!text-[0.65rem]" />
                                                 <Tag
@@ -4021,7 +4252,7 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                             </div>
                                         </div>
                                         <div class="min-w-[6rem]">
-                                            <p class="text-[0.65rem] uppercase tracking-wide text-slate-400">Source</p>
+                                            <p class="text-xs uppercase tracking-wide text-slate-500">Source</p>
                                             <Tag :value="data.source" :severity="sourceSeverity(data.source)" class="!text-[0.65rem]" />
                                         </div>
                                         <!-- SPLIT-DELIVERY SCHEDULING — labels which half of a split
@@ -4818,6 +5049,78 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
             </div>
         </Drawer>
 
+        <!-- Auto Generate — days to keep free (optional) -->
+        <Dialog
+            v-model:visible="autoDaysModalVisible"
+            modal
+            header="Auto Generate Schedule"
+            :style="{ width: '520px' }"
+            :breakpoints="{ '640px': '95vw' }"
+            :draggable="false"
+            :pt="{
+                root: { class: isDark ? '!bg-[#141D33] !border !border-white/10 !text-white !rounded-2xl !shadow-2xl dark-scope' : '!border !border-[rgba(30,41,59,0.06)] !rounded-2xl !shadow-2xl' },
+                header: { class: isDark ? '!bg-[#141D33] !border-b !border-white/10 !rounded-t-2xl' : '!rounded-t-2xl' },
+                content: { class: isDark ? '!bg-[#141D33]' : '' },
+                footer: { class: isDark ? '!bg-[#141D33] !border-t !border-white/10 !rounded-b-2xl' : '!rounded-b-2xl' },
+            }"
+        >
+            <p class="text-base font-semibold text-slate-800">Any day this section should stay free?</p>
+            <p class="mt-1 text-sm text-slate-500">
+                Tap a day to keep it free of classes for <span class="font-semibold text-slate-700">{{ section.section_code }}</span>.
+                Auto Generate will skip it, and you can still place subjects there yourself, such as online subjects.
+                Pick nothing to generate as usual.
+            </p>
+
+            <div class="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <button
+                    v-for="choice in autoDayChoices"
+                    :key="choice.value"
+                    type="button"
+                    class="auto-day-chip"
+                    :class="autoExcludedDays.includes(choice.value) ? 'auto-day-chip--free' : ''"
+                    :aria-pressed="autoExcludedDays.includes(choice.value)"
+                    @click="toggleAutoExcludedDay(choice.value)"
+                >
+                    <i :class="autoExcludedDays.includes(choice.value) ? 'pi pi-check-circle' : 'pi pi-calendar'"></i>
+                    <span class="auto-day-chip__name">{{ choice.name }}</span>
+                    <span class="auto-day-chip__tag">{{ autoExcludedDays.includes(choice.value) ? 'Free' : 'Use' }}</span>
+                </button>
+            </div>
+
+            <p
+                v-if="autoExcludesEveryDay"
+                class="mt-3 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+            >
+                <i class="pi pi-exclamation-triangle"></i>
+                Keep at least one class day available.
+            </p>
+            <p
+                v-else-if="autoExcludedDays.length > 0"
+                class="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+            >
+                <i class="pi pi-info-circle mt-0.5"></i>
+                With fewer days available, some subjects may not fit and will be left for you to schedule by hand.
+            </p>
+
+            <template #footer>
+                <Button
+                    v-if="autoExcludedDays.length > 0"
+                    label="Clear"
+                    text
+                    severity="secondary"
+                    @click="autoExcludedDays = []"
+                />
+                <Button label="Cancel" text severity="secondary" @click="autoDaysModalVisible = false" />
+                <Button
+                    :label="autoGenerateConfirmLabel"
+                    icon="pi pi-bolt"
+                    severity="help"
+                    :disabled="autoExcludesEveryDay"
+                    @click="confirmAutoGenerate"
+                />
+            </template>
+        </Dialog>
+
         <!-- Add Subject Dialog -->
         <Dialog
             v-model:visible="addDialogVisible"
@@ -5089,8 +5392,26 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
                                     <p class="font-semibold text-slate-800">
                                         {{ result.subject_code }} <span class="text-slate-400 font-normal">— {{ result.subject_title }}</span>
                                     </p>
-                                    <Tag v-if="resultHasHardConflict(result)" value="Scheduling Conflict" severity="danger" icon="pi pi-exclamation-triangle" class="!text-xs shrink-0" />
-                                    <Tag v-else-if="result.is_merged" value="Merged" severity="info" class="!text-xs shrink-0" />
+                                    <div class="flex items-center gap-1.5 shrink-0">
+                                        <Tag v-if="resultHasHardConflict(result)" value="Scheduling Conflict" severity="danger" icon="pi pi-exclamation-triangle" class="!text-xs shrink-0" />
+                                        <Tag v-else-if="result.is_merged" value="Merged" severity="info" class="!text-xs shrink-0" />
+                                        <!-- Remove just this subject from the generated schedule
+                                             (left unscheduled; Regenerate skips it). -->
+                                        <Button
+                                            type="button"
+                                            icon="pi pi-times"
+                                            text
+                                            rounded
+                                            severity="secondary"
+                                            size="small"
+                                            class="!h-7 !w-7 !p-0 hover:!bg-red-500/10 hover:!text-red-500"
+                                            :loading="autoRemovingIds.has(result.section_subject_id)"
+                                            :disabled="autoGenerating"
+                                            :aria-label="`Remove ${result.subject_code} from the auto schedule`"
+                                            v-tooltip.left="'Remove from auto schedule (the subject stays, just unscheduled)'"
+                                            @click="removeAutoResult(result)"
+                                        />
+                                    </div>
                                 </div>
 
                                 <!-- Hard conflict banner — names exactly which Section/Subject
@@ -5374,7 +5695,7 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
 </template>
 
 <style scoped>
-/* Header action buttons (Discard/Clear/Print/Auto Generate/Save) —
+/* Header action buttons (Discard/Clear/Auto Generate/Save) —
    fuller pill radius than the site-wide 8px default so this busy
    button row reads as one cohesive, more modern group. */
 .section-actions :deep(.p-button) {
@@ -5534,6 +5855,51 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
 .dark-scope :deep(.p-datatable-tbody > tr:hover) { background: rgba(255, 255, 255, 0.06) !important; }
 .dark-scope :deep(.p-datatable-tbody > tr:hover > td) { background: transparent !important; }
 .dark-scope :deep(.p-datatable-emptymessage) { color: #CBD5E1 !important; }
+
+/* Alternating subject bands — every other subject gets a cool-gray tint so
+   each subject's block is easy to tell apart at a glance. Conflict / warning
+   / unsaved rows (row-light-bg) keep their own red/amber colour, and the
+   blue "not yet scheduled" tint sits on the inner wrapper so it still shows. */
+.schedule-table :deep(.p-datatable-tbody > tr.stripe-a:not(.row-light-bg)),
+.schedule-table :deep(.p-datatable-tbody > tr.stripe-a:not(.row-light-bg) > td) {
+    background-color: #FFFFFF !important;
+}
+.schedule-table :deep(.p-datatable-tbody > tr.stripe-b:not(.row-light-bg)),
+.schedule-table :deep(.p-datatable-tbody > tr.stripe-b:not(.row-light-bg) > td) {
+    background-color: #E9EEF5 !important;
+}
+.schedule-table :deep(.p-datatable-tbody > tr.stripe-a:not(.row-light-bg):hover),
+.schedule-table :deep(.p-datatable-tbody > tr.stripe-a:not(.row-light-bg):hover > td),
+.schedule-table :deep(.p-datatable-tbody > tr.stripe-b:not(.row-light-bg):hover),
+.schedule-table :deep(.p-datatable-tbody > tr.stripe-b:not(.row-light-bg):hover > td) {
+    background-color: #D5E3FA !important; /* clear blue highlight under the cursor */
+}
+.schedule-table :deep(.p-datatable-tbody > tr.stripe-a:not(.row-light-bg):hover > td:first-child),
+.schedule-table :deep(.p-datatable-tbody > tr.stripe-b:not(.row-light-bg):hover > td:first-child) {
+    box-shadow: inset 4px 0 0 #2563EB; /* accent bar on the hovered subject */
+}
+.schedule-table :deep(.p-datatable-tbody > tr),
+.schedule-table :deep(.p-datatable-tbody > tr > td) {
+    transition: background-color 0.15s ease;
+}
+.dark-scope :deep(.p-datatable-tbody > tr.stripe-a:not(.row-light-bg)),
+.dark-scope :deep(.p-datatable-tbody > tr.stripe-a:not(.row-light-bg) > td) {
+    background-color: transparent !important;
+}
+.dark-scope :deep(.p-datatable-tbody > tr.stripe-b:not(.row-light-bg)),
+.dark-scope :deep(.p-datatable-tbody > tr.stripe-b:not(.row-light-bg) > td) {
+    background-color: rgba(148, 163, 184, 0.12) !important;
+}
+.dark-scope :deep(.p-datatable-tbody > tr.stripe-a:not(.row-light-bg):hover),
+.dark-scope :deep(.p-datatable-tbody > tr.stripe-a:not(.row-light-bg):hover > td),
+.dark-scope :deep(.p-datatable-tbody > tr.stripe-b:not(.row-light-bg):hover),
+.dark-scope :deep(.p-datatable-tbody > tr.stripe-b:not(.row-light-bg):hover > td) {
+    background-color: rgba(59, 130, 246, 0.22) !important;
+}
+.dark-scope :deep(.p-datatable-tbody > tr.stripe-a:not(.row-light-bg):hover > td:first-child),
+.dark-scope :deep(.p-datatable-tbody > tr.stripe-b:not(.row-light-bg):hover > td:first-child) {
+    box-shadow: inset 4px 0 0 #60A5FA;
+}
 .dark-scope :deep(.p-paginator) { background: transparent !important; color: #F1F5F9 !important; }
 
 .dark-scope :deep(.p-button-text.p-button-secondary) { color: #CBD5E1 !important; }
@@ -5622,4 +5988,40 @@ const categorySeverity = (category) => (category === 'Major' ? 'info' : 'seconda
 
 :global(.p-datepicker-panel.dark-scope) { background: #0F1730 !important; border: 1px solid rgba(255, 255, 255, 0.12) !important; color: #F8FAFC !important; }
 :global(.p-datepicker-panel.dark-scope .p-datepicker-calendar td span) { color: #F1F5F9 !important; }
+
+/* Auto Generate modal — day chips */
+.auto-day-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.7rem 0.85rem;
+    border: 1.5px solid #CBD5E1;
+    border-radius: 0.85rem;
+    background: #FFFFFF;
+    color: #334155;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.auto-day-chip:hover { border-color: #2563EB; background: #EFF6FF; }
+.auto-day-chip__name { flex: 1; text-align: left; }
+.auto-day-chip__tag {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 0.1rem 0.45rem;
+    border-radius: 9999px;
+    background: #F1F5F9;
+    color: #64748B;
+}
+.auto-day-chip--free { border-color: #10B981; background: #ECFDF5; color: #047857; }
+.auto-day-chip--free:hover { border-color: #059669; background: #D1FAE5; }
+.auto-day-chip--free .auto-day-chip__tag { background: #10B981; color: #FFFFFF; }
+.dark-scope .auto-day-chip { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.18); color: #E2E8F0; }
+.dark-scope .auto-day-chip:hover { border-color: #60A5FA; background: rgba(59, 130, 246, 0.15); }
+.dark-scope .auto-day-chip__tag { background: rgba(255, 255, 255, 0.1); color: #CBD5E1; }
+.dark-scope .auto-day-chip--free { border-color: #34D399; background: rgba(16, 185, 129, 0.16); color: #6EE7B7; }
+.dark-scope .auto-day-chip--free .auto-day-chip__tag { background: #10B981; color: #FFFFFF; }
 </style>

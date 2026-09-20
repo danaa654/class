@@ -396,6 +396,8 @@ onUnmounted(() => {
                                 v-if="contact.user.profile_photo_url"
                                 :src="contact.user.profile_photo_url"
                                 alt=""
+                                loading="lazy"
+                                decoding="async"
                                 class="h-9 w-9 shrink-0 rounded-full object-cover"
                             />
                             <span

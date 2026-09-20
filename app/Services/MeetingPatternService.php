@@ -374,7 +374,48 @@ class MeetingPatternService
      */
     public function allowedDays(): array
     {
-        return SchoolYear::active()?->allowedDays() ?? SchoolYear::DEFAULT_CLASS_DAYS;
+        $schoolYearDays = SchoolYear::active()?->allowedDays() ?? SchoolYear::DEFAULT_CLASS_DAYS;
+
+        // PER-RUN DAY EXCLUSIONS — days the user picked in the Auto
+        // Generate modal as "keep free for this section". Applied on
+        // top of the School Year's Class Days so every consumer of
+        // allowedDays() (day-pattern selection, sibling-pattern
+        // copying, time recommendation, manual-time validation)
+        // honors them for the duration of that one run, with no
+        // per-consumer changes. Always empty outside a run — see
+        // AutoScheduleService::generate(), which sets and clears it.
+        if (! empty(self::$excludedDays)) {
+            return array_values(array_diff($schoolYearDays, self::$excludedDays));
+        }
+
+        return $schoolYearDays;
+    }
+
+    /**
+     * Day tokens excluded for the CURRENT Auto Generate run only.
+     * Static on purpose: RecommendationService, SiblingSectionPatternService
+     * and this service are each constructed separately by the container,
+     * so instance state wouldn't be shared between them. Callers must
+     * always reset it in a `finally` (see AutoScheduleService::generate()).
+     *
+     * @var list<string>
+     */
+    private static array $excludedDays = [];
+
+    /**
+     * @param  list<string>  $days  Day tokens ('Mon'..'Sun'); pass [] to clear.
+     */
+    public static function setExcludedDays(array $days): void
+    {
+        self::$excludedDays = array_values(array_intersect(SchoolYear::ALL_DAYS, $days));
+    }
+
+    /**
+     * @return list<string>
+     */
+    public static function excludedDays(): array
+    {
+        return self::$excludedDays;
     }
 
     /**

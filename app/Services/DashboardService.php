@@ -10,6 +10,7 @@ use App\Models\SectionSubject;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 
 /**
  * DASHBOARD DATA — single source of truth for every widget on the
@@ -66,15 +67,73 @@ class DashboardService
      */
     public function overview(User $user): array
     {
+        // PERFORMANCE — this endpoint fans out into ~10 aggregate
+        // queries (kpis/progress/conflicts each scan Section/
+        // SectionSubject/Faculty/Room) and is hit on every Dashboard
+        // load. It's cheap to get slightly stale for a few seconds
+        // but expensive to recompute on every request, so we cache it
+        // per-user-scope (Administrator/Registrar all share one
+        // institution-wide entry; Dean/OIC/Assistant Dean each get
+        // their own College/GenEd entry) for a short TTL.
+        //
+        // Invalidation: anything that changes Section/SectionSubject/
+        // Faculty/Room data (schedule saves, finalizes, conflict
+        // resolution) should call self::forget() for the affected
+        // scope — see ScheduleConflictService and SectionController
+        // for the call sites. Worst case without an explicit forget()
+        // call, the cache simply expires after self::TTL_SECONDS.
         $scope = $this->scopeFor($user);
-        $sectionIds = $this->scopedSectionIds($scope);
+        $cacheKey = $this->overviewCacheKey($scope);
 
-        return [
-            'scope' => $scope,
-            'kpis' => $this->kpis($scope, $sectionIds),
-            'progress' => $this->schedulingProgress($scope, $sectionIds),
-            'conflicts' => $this->conflictSummary($scope, $sectionIds),
-        ];
+        return Cache::remember($cacheKey, self::TTL_SECONDS, function () use ($scope) {
+            $sectionIds = $this->scopedSectionIds($scope);
+
+            return [
+                'scope' => $scope,
+                'kpis' => $this->kpis($scope, $sectionIds),
+                'progress' => $this->schedulingProgress($scope, $sectionIds),
+                'conflicts' => $this->conflictSummary($scope, $sectionIds),
+            ];
+        });
+    }
+
+    /**
+     * How long a computed Dashboard overview is considered fresh.
+     * Short enough that a Registrar finalizing a schedule sees the
+     * effect within a minute even if nothing explicitly busts the
+     * cache; long enough to absorb repeated page loads/refreshes.
+     */
+    private const TTL_SECONDS = 60;
+
+    /**
+     * Stable cache key for a given scope — same shape scopeFor()
+     * returns, so two users with the same role/College always share
+     * one cached computation instead of duplicating the work.
+     */
+    private function overviewCacheKey(array $scope): string
+    {
+        return sprintf(
+            'dashboard.overview.%s.%s',
+            $scope['type'],
+            $scope['college_id'] ?? 'none',
+        );
+    }
+
+    /**
+     * Bust every cached Dashboard overview. Call this (or a scoped
+     * variant) after writes that change Section/SectionSubject/
+     * Faculty/Room data. Institution-wide scope is forgotten
+     * unconditionally; pass a college_id to also forget that
+     * College's Dean/OIC scope.
+     */
+    public static function forget(?int $collegeId = null): void
+    {
+        Cache::forget('dashboard.overview.institution.none');
+        Cache::forget('dashboard.overview.general_education.none');
+
+        if ($collegeId !== null) {
+            Cache::forget("dashboard.overview.college.{$collegeId}");
+        }
     }
 
     /**

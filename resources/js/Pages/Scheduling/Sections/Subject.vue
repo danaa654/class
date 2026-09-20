@@ -4,6 +4,7 @@ import { ref, reactive, computed } from 'vue';
 import { useToast } from 'primevue/usetoast';
 import Swal from 'sweetalert2';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import BackLink from '@/Components/BackLink.vue';
 import Card from 'primevue/card';
 import Toolbar from 'primevue/toolbar';
 import Button from 'primevue/button';
@@ -428,9 +429,7 @@ const onAddManual = () => {
 
         <div class="max-w-[100rem] mx-auto w-full">
             <div class="mb-4">
-                <Link :href="route('scheduling.sections')" class="text-sm text-slate-500 hover:text-slate-700">
-                    <i class="pi pi-arrow-left mr-1"></i> Back to Sections
-                </Link>
+                <BackLink :href="route('scheduling.sections')" label="Back to Sections" />
             </div>
 
             <!-- Page Title -->
